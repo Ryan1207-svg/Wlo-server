@@ -14,109 +14,185 @@ namespace Network.ActionCodes
     public class AC23 : AC
     {
         public override int ID { get { return 23; } }
+
         public override void ProcessPkt(Player r, RecievePacket p)
         {
             p.SetPtr(6);
             switch (p.B)
             {
-                // case 1: Recv1(ref r, p); break;
-                case 2: Recv2(r, p); break; // Get item ground
-                case 3: Recv3(r, p); break; // drop item ground
-                case 10: Recv10(r, p); break;// move item inv
-                case 11: Recv11(r, p); break;// item selected to wear in inv
-                case 12: Recv12(r, p); break;// item selected to remove
-                case 14: Recv14(r, p); break;// Compound synthesis
-                case 15: Recv15(r, p); break;// Quick HP/MP refill / Open tent
-                case 25: Recv25(r, p); break;// Request IM Point Balance
-                case 26: Recv26(r, p); break;// Buy Item from Mall
-                case 54: Recv54(r, p); break;// Request Item Mall Catalog List
-                case 77: Recv77(r, p); break;// Request Player Stall / Market Listings
-                case 96: Recv96(r, p); break;// Older/client variant
-                case 128: Recv96(r, p); break;// Rhode Island item-use packet
-                case 124: Recv124(r, p); break;
-                default: DebugSystem.Write($"AC {p.A},{p.B} has not been coded"); break;
+                case 2: Recv2(r, p); break;       // Get item from ground
+                case 3: Recv3(r, p); break;       // Drop item to ground
+                case 10: Recv10(r, p); break;     // Move inventory item
+                case 11: Recv11(r, p); break;     // Equip
+                case 12: Recv12(r, p); break;     // Unequip
+                case 14: Recv14(r, p); break;     // Compound synthesis
+                case 15: Recv15(r, p); break;     // Quick HP/SP refill / tent
+                case 25: Recv25(r, p); break;     // IM balance
+                case 26: Recv26(r, p); break;     // Direct Item Mall buy
+                case 54: Recv54(r, p); break;     // Item Mall catalog
+                case 77: Recv77(r, p); break;     // Player stall list
+                case 96: RecvUseItem(r, p, 96); break;   // Older client variant
+                case 128: RecvUseItem(r, p, 128); break; // Rhode Island double-click/use
+                case 124: Recv124(r, p); break;    // Confirm destroy
+                default:
+                    DebugSystem.Write($"AC {p.A},{p.B} has not been coded");
+                    break;
             }
         }
 
-        void Recv96(Player p, RecievePacket r)
+        private static void SendItemMessage(Player p, string message)
+        {
+            if (p == null || string.IsNullOrWhiteSpace(message)) return;
+            p.Send(Tools.FromFormat("bbbs", 23, 57, 0, message));
+        }
+
+        private static string GetItemName(InvItem item, ushort itemId)
+        {
+            if (item != null && !string.IsNullOrWhiteSpace(item.Name))
+                return item.Name.Trim('\0', ' ');
+            return $"Item #{itemId}";
+        }
+
+        /// <summary>
+        /// Reads HP/SP recovery values from Item.dat. The range fallbacks are retained only
+        /// for known legacy food/potion groups; unknown items are never consumed as food.
+        /// </summary>
+        private static bool TryGetRecovery(ushort itemId, DataFiles.PhxItemInfo itemInfo, out int hpGain, out int spGain)
+        {
+            hpGain = 0;
+            spGain = 0;
+
+            if (itemInfo != null && itemInfo.StatusType != null && itemInfo.StatusUp != null)
+            {
+                int len = Math.Min(itemInfo.StatusType.Length, itemInfo.StatusUp.Length);
+                for (int i = 0; i < len; i++)
+                {
+                    if (itemInfo.StatusType[i] == 207) hpGain += itemInfo.StatusUp[i];
+                    else if (itemInfo.StatusType[i] == 208) spGain += itemInfo.StatusUp[i];
+                }
+            }
+
+            if (hpGain == 0 && spGain == 0)
+            {
+                if (itemId >= 28001 && itemId <= 28050)
+                {
+                    hpGain = 60;
+                    spGain = 40;
+                }
+                else if (itemId >= 30201 && itemId <= 30210)
+                {
+                    hpGain = 150;
+                    spGain = 80;
+                }
+                else if (itemId >= 23001 && itemId <= 23060)
+                {
+                    hpGain = 100;
+                    spGain = 100;
+                }
+            }
+
+            return hpGain > 0 || spGain > 0;
+        }
+
+        /// <summary>
+        /// WLO Potential levels are cumulative bonuses to all five base attributes.
+        /// Level 1-4 add one point on each successful step; 5-12 add 2..9 respectively.
+        /// Until the authentic Rhode Island failure-rate table is captured, this emulator
+        /// uses safe-success mode so a valid pill cannot disappear without applying an effect.
+        /// </summary>
+        private static bool UsePotentialPill(Player p, byte slot, string itemName)
+        {
+            if (p == null) return false;
+
+            int current = p.Potential;
+            if (current >= 12)
+            {
+                SendItemMessage(p, "Potential is already at the maximum level (12).");
+                return true;
+            }
+
+            int next = current + 1;
+            int delta = next <= 4 ? 1 : next - 3;
+
+            p.baseStr = (ushort)Math.Min(ushort.MaxValue, p.baseStr + delta);
+            p.baseCon = (ushort)Math.Min(ushort.MaxValue, p.baseCon + delta);
+            p.baseInt = (ushort)Math.Min(ushort.MaxValue, p.baseInt + delta);
+            p.baseWis = (ushort)Math.Min(ushort.MaxValue, p.baseWis + delta);
+            p.baseAgi = (ushort)Math.Min(ushort.MaxValue, p.baseAgi + delta);
+            p.Potential = (ushort)next;
+
+            p.Inv.RemoveItem(slot, 1);
+            p.Eqs?.Send8_1();
+            p.SaveCharacterData();
+
+            SendItemMessage(p, $"{itemName} succeeded! Potential {current} -> {next}; STR/CON/INT/WIS/AGI +{delta}.");
+            DebugSystem.Write($"[AC23.UseItem] {p.CharName} used Potential Pill #{34269}: Potential {current}->{next}, all base stats +{delta}.");
+            return true;
+        }
+
+        private void RecvUseItem(Player p, RecievePacket r, byte subCode)
         {
             try
             {
-                byte slot = r.Unpack8();
-                if (slot < 1 || slot > 50) return;
-                var item = p.Inv[slot];
-                if (item == null || item.ItemID == 0) return;
-
-                ushort itemId = item.ItemID;
-                string itemName = !string.IsNullOrEmpty(item.Name) ? item.Name.Trim('\0', ' ') : $"Item #{itemId}";
-
-                // 1. Tent (36002)
-                if (itemId == 36002)
+                byte slot;
+                try { slot = r.Unpack8(); }
+                catch
                 {
-                    p.Tent.Open();
+                    DebugSystem.Write($"[AC23.UseItem] Malformed AC23:{subCode} from {p?.CharName ?? "Unknown"}: missing inventory slot.");
                     return;
                 }
 
-                // 2. Equipable items
+                if (slot < 1 || slot > 50)
+                {
+                    DebugSystem.Write($"[AC23.UseItem] Invalid slot {slot} from {p?.CharName ?? "Unknown"} (AC23:{subCode}).");
+                    return;
+                }
+
+                var item = p.Inv[slot];
+                if (item == null || item.ItemID == 0)
+                {
+                    DebugSystem.Write($"[AC23.UseItem] Empty slot {slot} from {p.CharName} (AC23:{subCode}).");
+                    p.Inv.SendFullSync();
+                    return;
+                }
+
+                ushort itemId = item.ItemID;
+                string itemName = GetItemName(item, itemId);
                 var itemInfo = cGlobal.ItemDatManager?.GetItemByID(itemId);
+
+                // Tent
+                if (itemId == 36002 || item.Type == eItemType.Tent)
+                {
+                    p.Tent.Open();
+                    DebugSystem.Write($"[AC23.UseItem] {p.CharName} opened tent from slot {slot}.");
+                    return;
+                }
+
+                // Equipable items should equip rather than be consumed.
                 if (itemInfo != null && itemInfo.Equippos > 0)
                 {
                     p.WearEQ(slot);
+                    p.SaveCharacterData();
+                    DebugSystem.Write($"[AC23.UseItem] {p.CharName} equipped {itemName} (#{itemId}) from slot {slot}.");
                     return;
                 }
 
-                // 3. Special Quest Items & Star Currency (#30025)
-                if (itemId == 30025) // Star
+                // Potential Pill
+                if (itemId == 34269)
                 {
-                    p.Send(Tools.FromFormat("bbbs", 23, 57, 0, "Stars are special quest tokens used for skill learning, resets, and rebirth quests."));
+                    UsePotentialPill(p, slot, itemName);
                     return;
                 }
 
-                // 4. Pet Vouchers / Summon Cards / Quest Item Vouchers
-                if (itemName.ToLower().Contains("vouche") || itemName.ToLower().Contains("card") || (itemInfo != null && itemInfo.ItemType == 14))
+                // Star currency is intentionally not consumed by double-click.
+                if (itemId == 30025)
                 {
-                    p.Inv.RemoveItem(slot, 1);
-                    p.Send(Tools.FromFormat("bbbs", 23, 57, 0, $"Used {itemName}! Pet voucher successfully redeemed."));
-                    DebugSystem.Write($"[AC23.Recv96] {p.CharName} used pet voucher {itemName} (#{itemId}).");
+                    SendItemMessage(p, "Stars are special quest tokens used for skill learning, resets, and rebirth quests.");
                     return;
                 }
 
-                // 5. Food / Potions / Healing / Consumable items
-                int hpGain = 0;
-                int spGain = 0;
-                if (itemInfo != null)
-                {
-                    if (itemInfo.StatusType != null && itemInfo.StatusUp != null)
-                    {
-                        for (int i = 0; i < Math.Min(itemInfo.StatusType.Length, itemInfo.StatusUp.Length); i++)
-                        {
-                            if (itemInfo.StatusType[i] == 207) hpGain += itemInfo.StatusUp[i];
-                            else if (itemInfo.StatusType[i] == 208) spGain += itemInfo.StatusUp[i];
-                        }
-                    }
-                }
-
-                // Fallback for standard food / potions if not in ItemDat
-                if (hpGain == 0 && spGain == 0)
-                {
-                    if (itemId >= 28001 && itemId <= 28050) // Fruit / Food
-                    {
-                        hpGain = 60;
-                        spGain = 40;
-                    }
-                    else if (itemId >= 30201 && itemId <= 30210) // Potions
-                    {
-                        hpGain = 150;
-                        spGain = 80;
-                    }
-                    else if (itemId >= 23001 && itemId <= 23060) // Syrups / Candies
-                    {
-                        hpGain = 100;
-                        spGain = 100;
-                    }
-                }
-
-                if (hpGain > 0 || spGain > 0)
+                // Data-driven HP/SP consumables.
+                if (TryGetRecovery(itemId, itemInfo, out int hpGain, out int spGain))
                 {
                     if (p.Eqs != null)
                     {
@@ -126,21 +202,22 @@ namespace Network.ActionCodes
                     }
 
                     p.Inv.RemoveItem(slot, 1);
-                    p.Send(Tools.FromFormat("bbbs", 23, 57, 0, $"Used {itemName}! Recovered {hpGain} HP and {spGain} SP."));
                     p.SaveCharacterData();
-                    DebugSystem.Write($"[AC23.Recv96] {p.CharName} consumed {itemName} (#{itemId}) at slot {slot}: +{hpGain} HP, +{spGain} SP.");
+                    SendItemMessage(p, $"Used {itemName}! Recovered {hpGain} HP and {spGain} SP.");
+                    DebugSystem.Write($"[AC23.UseItem] {p.CharName} consumed {itemName} (#{itemId}) at slot {slot}: +{hpGain} HP, +{spGain} SP.");
                     return;
                 }
 
-                // Generic Consumable fallback
-                p.Inv.RemoveItem(slot, 1);
-                p.Send(Tools.FromFormat("bbbs", 23, 57, 0, $"Used {itemName}!"));
-                p.SaveCharacterData();
-                DebugSystem.Write($"[AC23.Recv96] {p.CharName} used generic item {itemName} (#{itemId}) at slot {slot}.");
+                // Do NOT fake-success and delete unknown items. This preserves the item while
+                // giving us a precise diagnostic to add its authentic handler.
+                string typeText = itemInfo != null ? itemInfo.ItemType.ToString() : "missing Item.dat";
+                SendItemMessage(p, $"{itemName} is not implemented by the server yet; the item was not consumed.");
+                DebugSystem.Write($"[ITEM UNSUPPORTED] Player={p.CharName} Slot={slot} ItemID={itemId} Name='{itemName}' ItemType={typeText} SubCode={subCode}");
             }
             catch (Exception t)
             {
-                DebugSystem.Write($"[AC23.Recv96] Error using item: {t.Message}");
+                DebugSystem.Write($"[AC23.UseItem] Error: {t.Message}\n{t.StackTrace}");
+                try { p?.Inv?.SendFullSync(); } catch { }
             }
         }
 
@@ -148,21 +225,14 @@ namespace Network.ActionCodes
         {
             try
             {
-                // Dispatch catalogs and point balance so client flag 0x5698 is active
                 ItemMallManager.SendCatalog(p, isBonus: false);
                 ItemMallManager.SendCatalog(p, isBonus: true);
                 ItemMallManager.SendPointBalance(p);
-
                 DebugSystem.Write($"[AC23.Recv54] Item Mall catalogs and balance dispatched to {p.CharName}");
             }
-            catch (Exception t) { Console.WriteLine(t); }
+            catch (Exception t) { DebugSystem.Write(new ExceptionData(t)); }
         }
 
-        /// <summary>
-        /// Send item mall catalog to player. Called on map-enter (authentic server behavior).
-        /// S->C: A=54, B=201(0xC9), [0x00, count(1B), items(3B each)]
-        /// Delegates to ItemMallManager.SendCatalog.
-        /// </summary>
         public static void SendCatalog(Player p)
         {
             Game.PlayerRelated.ItemMallManager.SendCatalog(p);
@@ -172,15 +242,10 @@ namespace Network.ActionCodes
         {
             try
             {
-                // AC 23:77 = Client requesting stall/player-shop list
-                // Response sequence (pcap confirmed):
-                //   S->C [23, 4, 0]    = stall list, 0 active stalls
-                //   S->C [23, 102]     = end of stall list
-                // Without these, client shows "Can't load list" indefinitely.
                 SendPacket pkt = new SendPacket();
                 pkt.Pack8(23);
                 pkt.Pack8(4);
-                pkt.Pack8(0); // stall count = 0
+                pkt.Pack8(0);
                 p.Send(pkt);
 
                 SendPacket endPkt = new SendPacket();
@@ -190,16 +255,13 @@ namespace Network.ActionCodes
 
                 DebugSystem.Write($"[AC23.Recv77] Sent empty stall list to {p.CharName}");
             }
-            catch (Exception t) { Console.WriteLine(t); }
+            catch (Exception t) { DebugSystem.Write(new ExceptionData(t)); }
         }
 
         void Recv25(Player p, RecievePacket r)
         {
-            try
-            {
-                Game.PlayerRelated.ItemMallManager.SendPointBalance(p);
-            }
-            catch (Exception t) { Console.WriteLine(t); }
+            try { ItemMallManager.SendPointBalance(p); }
+            catch (Exception t) { DebugSystem.Write(new ExceptionData(t)); }
         }
 
         void Recv26(Player p, RecievePacket r)
@@ -210,19 +272,16 @@ namespace Network.ActionCodes
                 byte count = 1;
                 try { count = r.Unpack8(); } catch { count = 1; }
                 if (count == 0) count = 1;
-                Game.PlayerRelated.ItemMallManager.PurchaseItem(p, itemId, count);
-                p.SaveCharacterData();
+
+                bool success = ItemMallManager.PurchaseItem(p, itemId, count);
+                if (success)
+                    p.SaveCharacterData();
             }
-            catch (Exception t) { Console.WriteLine(t); }
+            catch (Exception t) { DebugSystem.Write(new ExceptionData(t)); }
         }
 
         void Recv1(Player p, RecievePacket r)
         {
-            try
-            {
-
-            }
-            catch (Exception t) { Console.WriteLine(t); }
         }
 
         void Recv2(Player p, RecievePacket r)
@@ -233,7 +292,7 @@ namespace Network.ActionCodes
                 ((GameMap)p.CurMap).onItemPickup(p, pos);
                 p.SaveCharacterData();
             }
-            catch (Exception t) { Console.WriteLine(t); }
+            catch (Exception t) { DebugSystem.Write(new ExceptionData(t)); }
         }
 
         void Recv3(Player p, RecievePacket r)
@@ -243,31 +302,30 @@ namespace Network.ActionCodes
                 byte pos = r.Unpack8();
                 byte qnt = r.Unpack8();
                 byte ukn = r.Unpack8();
-                var item = p.Inv[pos];
+                if (pos < 1 || pos > 50 || qnt == 0) return;
 
-                if (item != null)
+                var item = p.Inv[pos];
+                if (item == null || item.ItemID == 0) return;
+
+                if (item.Dropable)
                 {
-                    if (item.Dropable)
-                    {
-                        ((GameMap)p.CurMap).onItemDrop(p, pos, qnt);
-                        p.SaveCharacterData();
-                    }
-                    else
-                    {
-                        // test need ASK destroy
-                        SendPacket s = new SendPacket();
-                        s.PackArray(new byte[] { 23, 212, 255 });
-                        s.Pack8(pos);
-                        s.Pack16(item.ItemID);
-                        s.Pack8(qnt);
-                        p.Send(s);
-                    }
+                    ((GameMap)p.CurMap).onItemDrop(p, pos, qnt);
+                    p.SaveCharacterData();
+                }
+                else
+                {
+                    SendPacket s = new SendPacket();
+                    s.PackArray(new byte[] { 23, 212, 255 });
+                    s.Pack8(pos);
+                    s.Pack16(item.ItemID);
+                    s.Pack8(qnt);
+                    p.Send(s);
                 }
             }
-            catch (Exception t) { Console.WriteLine(t); }
+            catch (Exception t) { DebugSystem.Write(new ExceptionData(t)); }
         }
 
-        void Recv10(Player p, RecievePacket r) // move item inventory
+        void Recv10(Player p, RecievePacket r)
         {
             try
             {
@@ -275,13 +333,13 @@ namespace Network.ActionCodes
                 byte ammt = r.Unpack8();
                 byte dst = r.Unpack8();
 
-                if (((src > 0) && (src < 51)) && ((dst > 0) && (dst < 51)) && ((ammt > 0) && (ammt < 51)))
+                if (src > 0 && src < 51 && dst > 0 && dst < 51 && ammt > 0 && ammt <= 50)
                 {
                     p.Inv.MoveItem(src, dst, ammt);
                     p.SaveCharacterData();
                 }
             }
-            catch (Exception t) { Console.WriteLine(t); }
+            catch (Exception t) { DebugSystem.Write(new ExceptionData(t)); }
         }
 
         void Recv11(Player p, RecievePacket r)
@@ -289,37 +347,33 @@ namespace Network.ActionCodes
             try
             {
                 byte loc = r.Unpack8();
-                if ((loc > 0) && (loc < 51))
+                if (loc > 0 && loc < 51)
                 {
                     p.WearEQ(loc);
                     p.SaveCharacterData();
                 }
             }
-            catch (Exception t) { Console.WriteLine(t); }
+            catch (Exception t) { DebugSystem.Write(new ExceptionData(t)); }
         }
 
-        void Recv12(Player p, RecievePacket r) // item selected to remove
+        void Recv12(Player p, RecievePacket r)
         {
             try
             {
                 byte loc = r.Unpack8();
                 byte dst = r.Unpack8();
-                if ((loc > 0) && (loc < 7) && (dst > 0) && (dst < 51))
+                if (loc > 0 && loc < 7 && dst > 0 && dst < 51)
                 {
                     p.unWearEQ(loc, dst);
                     p.SaveCharacterData();
                 }
             }
-            catch (Exception t) { Console.WriteLine(t); }
+            catch (Exception t) { DebugSystem.Write(new ExceptionData(t)); }
         }
 
         /// <summary>
-        /// AC 23:14 - Compound Synthesis (Confirmed via yerdenitemalipcompounddaikiitemikaristirdim.pcapng)
-        /// C->S: 17 0e <count=2> <slot1> <slot2>
-        /// S->C: 17 09 <slot1> <amt1>, 17 09 <slot2> <amt2> (Remove ingredients)
-        /// S->C: 17 08 <targetSlot> <resultItemId(2B)> <count(1B)> <28B zeros> (Add result)
-        /// S->C: 17 0d <resultItemId(2B)> <count(1B)> <targetSlot> (Success notification/popup)
-        /// S->C: 17 7a <charId(4B)> (Broadcast animation)
+        /// AC23:14 compound synthesis. The result insertion packet layout is also used by
+        /// Inventory.SendSlotState so all item creation paths agree on AC23:8.
         /// </summary>
         void Recv14(Player p, RecievePacket r)
         {
@@ -340,50 +394,34 @@ namespace Network.ActionCodes
                 ushort id2 = item2.ItemID;
 
                 var recipe = Game.Crafting.AlchemyManager.FindRecipe(id1, id2);
-                ushort resultItemId = 27008; // Charcoal / Ash default fallback
-                if (recipe != null)
+                ushort resultItemId = recipe != null
+                    ? recipe.OutputItem
+                    : (id1 == id2 ? id1 : (ushort)Math.Max(id1, id2));
+
+                var baseItem = cGlobal.ItemDatManager?.GetItemByID(resultItemId);
+                if (baseItem == null)
                 {
-                    resultItemId = recipe.OutputItem;
-                }
-                else
-                {
-                    resultItemId = (id1 == id2) ? id1 : (ushort)Math.Max(id1, id2);
+                    SendItemMessage(p, $"Compound result #{resultItemId} is missing from Item.dat. Ingredients were not consumed.");
+                    DebugSystem.Write($"[AC23.Recv14] Rejected compound result #{resultItemId}: missing Item.dat entry.");
+                    return;
                 }
 
                 byte targetSlot = Math.Min(slot1, slot2);
 
-                // Deduct ingredients (p.Inv.RemoveItem sends AC 23:9 for each removed slot)
                 p.Inv.RemoveItem(slot1, 1);
                 p.Inv.RemoveItem(slot2, 1);
 
-                // Add crafted item into targetSlot
-                var baseItem = cGlobal.ItemDatManager?.GetItemByID(resultItemId);
-                if (baseItem == null)
-                {
-                    baseItem = new DataFiles.PhxItemInfo
-                    {
-                        ItemID = resultItemId,
-                        ItemName = Encoding.ASCII.GetBytes("Item " + resultItemId),
-                        cellwidth = 1,
-                        cellheight = 1
-                    };
-                }
                 var resultItem = new InvItem();
                 resultItem.CopyFrom(baseItem);
                 resultItem.Ammt = 1;
-                p.Inv.AddItem(resultItem, targetSlot, false);
+                int added = p.Inv.AddItem(resultItem, targetSlot, true);
+                if (added != 1)
+                {
+                    DebugSystem.Write($"[AC23.Recv14] Could not insert compound result #{resultItemId} into slot {targetSlot}.");
+                    p.Inv.SendFullSync();
+                    return;
+                }
 
-                // Send authentic AC 23:8 [17 08 <targetSlot> <resultId (2B)> <count (1B)> <28B zeros>]
-                SendPacket s8 = new SendPacket();
-                s8.Pack8(23);
-                s8.Pack8(8);
-                s8.Pack8(targetSlot);
-                s8.Pack16(resultItemId);
-                s8.Pack8(1);
-                s8.PackArray(new byte[28]);
-                p.Send(s8);
-
-                // Send authentic AC 23:13 [17 0d <resultId (2B)> <count (1B)> <targetSlot>]
                 SendPacket s13 = new SendPacket();
                 s13.Pack8(23);
                 s13.Pack8(13);
@@ -392,7 +430,6 @@ namespace Network.ActionCodes
                 s13.Pack8(targetSlot);
                 p.Send(s13);
 
-                // Broadcast synthesis visual effect AC 23:122 [17 7a <charId (4B)>]
                 SendPacket s122 = new SendPacket();
                 s122.Pack8(23);
                 s122.Pack8(122);
@@ -402,15 +439,16 @@ namespace Network.ActionCodes
                 p.SaveCharacterData();
                 DebugSystem.Write($"[AC23.Recv14] {p.CharName} compounded slot {slot1} (#{id1}) + slot {slot2} (#{id2}) -> #{resultItemId} at slot {targetSlot}");
             }
-            catch (Exception t) { DebugSystem.Write(new ExceptionData(t)); }
+            catch (Exception t)
+            {
+                DebugSystem.Write(new ExceptionData(t));
+                try { p?.Inv?.SendFullSync(); } catch { }
+            }
         }
 
         /// <summary>
-        /// AC 23:15 - Quick HP/MP Refill Button & Tent (Confirmed via hpmpdoldurmabutonu.pcapng)
-        /// C->S: 17 0f <slot> <count> <target(2B: 0=player, >0=pet)>
-        /// S->C: 17 d0 01 <slot> <remainingAmmt> 00 00 00 (Remaining quantity update)
-        /// S->C: 05 01 <charId> <curHp> (HP/SP visual update)
-        /// S->C: 08 01 ... (Player stat sync) or 08 02 ... (Pet stat sync)
+        /// AC23:15 quick HP/SP refill / tent. Unknown items are rejected rather than being
+        /// treated as a fake +50/+50 consumable.
         /// </summary>
         void Recv15(Player p, RecievePacket r)
         {
@@ -428,89 +466,63 @@ namespace Network.ActionCodes
                 var item = p.Inv[pos];
                 if (item == null || item.ItemID == 0) return;
 
-                // 1. Tent
-                if (item.ItemID == 36002)
+                if (item.ItemID == 36002 || item.Type == eItemType.Tent)
                 {
                     p.Tent.Open();
                     return;
                 }
 
-                // 2. Quick HP/MP Consumable Recovery
-                int hpGain = 0;
-                int spGain = 0;
                 var itemInfo = cGlobal.ItemDatManager?.GetItemByID(item.ItemID);
-                if (itemInfo != null && itemInfo.StatusType != null && itemInfo.StatusUp != null)
+                if (!TryGetRecovery(item.ItemID, itemInfo, out int hpGain, out int spGain))
                 {
-                    for (int i = 0; i < Math.Min(itemInfo.StatusType.Length, itemInfo.StatusUp.Length); i++)
-                    {
-                        if (itemInfo.StatusType[i] == 207) hpGain += itemInfo.StatusUp[i];
-                        else if (itemInfo.StatusType[i] == 208) spGain += itemInfo.StatusUp[i];
-                    }
-                }
-                if (hpGain == 0 && spGain == 0)
-                {
-                    if (item.ItemID >= 28001 && item.ItemID <= 28050) { hpGain = 60; spGain = 40; }
-                    else if (item.ItemID >= 30201 && item.ItemID <= 30210) { hpGain = 150; spGain = 80; }
-                    else if (item.ItemID >= 23001 && item.ItemID <= 23060) { hpGain = 100; spGain = 100; }
-                    else { hpGain = 50; spGain = 50; }
+                    SendItemMessage(p, $"{GetItemName(item, item.ItemID)} cannot be used as an HP/SP refill item.");
+                    DebugSystem.Write($"[ITEM UNSUPPORTED] AC23:15 Player={p.CharName} Slot={pos} ItemID={item.ItemID} Name='{GetItemName(item, item.ItemID)}'");
+                    return;
                 }
 
-                if (hpGain > 0 || spGain > 0)
+                byte useCount = (byte)Math.Min(item.Ammt, count);
+                if (useCount == 0) return;
+
+                if (target == 0)
                 {
-                    // Check target: 0 = Player, >0 = Pet Slot
-                    if (target == 0)
+                    if (p.Eqs != null)
                     {
-                        if (p.Eqs != null)
-                        {
-                            p.Eqs.CurHP = Math.Min(p.Eqs.FullHP, p.Eqs.CurHP + hpGain * count);
-                            p.Eqs.CurSP = Math.Min(p.Eqs.FullSP, p.Eqs.CurSP + spGain * count);
-                            p.Eqs.Send8_1();
-                        }
-                        p.Send(Tools.FromFormat("bbdw", 5, 1, p.CharID, (ushort)(p.Eqs != null ? p.Eqs.CurHP : 0)));
+                        p.Eqs.CurHP = Math.Min(p.Eqs.FullHP, p.Eqs.CurHP + hpGain * useCount);
+                        p.Eqs.CurSP = Math.Min(p.Eqs.FullSP, p.Eqs.CurSP + spGain * useCount);
+                        p.Eqs.Send8_1();
                     }
-                    else if (p.PlayerPets != null)
-                    {
-                        byte petSlot = (byte)target;
-                        Player.PlayerPetData pet = null;
-                        if (p.PlayerPets.TryGetValue(petSlot, out var pPet)) pet = pPet;
-                        else if (petSlot > 0 && p.PlayerPets.TryGetValue((byte)(petSlot - 1), out var pPet0)) pet = pPet0;
-                        else if (p.PlayerPets.Values.Any(x => x.IsBattle)) pet = p.PlayerPets.Values.FirstOrDefault(x => x.IsBattle);
-
-                        if (pet != null)
-                        {
-                            pet.HP = Math.Min(pet.MaxHP, pet.HP + hpGain * count);
-                            pet.SP = Math.Min(pet.MaxSP, pet.SP + spGain * count);
-                            p.Send(Tools.FromFormat("bbbbdd", 8, 2, 25, petSlot, (uint)pet.HP, 0));
-                            p.Send(Tools.FromFormat("bbbbdd", 8, 2, 26, petSlot, (uint)pet.SP, 0));
-                            p.Send(Tools.FromFormat("bbdw", 5, 1, pet.PetID, (ushort)pet.HP));
-                        }
-                    }
-
-                    // Deduct item count or remove
-                    if (item.Ammt > count)
-                    {
-                        item.Ammt -= count;
-                        SendPacket s208 = new SendPacket();
-                        s208.Pack8(23);
-                        s208.Pack8(208);
-                        s208.Pack8(1);
-                        s208.Pack8(pos);
-                        s208.Pack8(item.Ammt);
-                        s208.Pack8(0);
-                        s208.Pack8(0);
-                        s208.Pack8(0);
-                        p.Send(s208);
-                    }
-                    else
-                    {
-                        p.Inv.RemoveItem(pos, item.Ammt);
-                    }
-
-                    p.SaveCharacterData();
-                    DebugSystem.Write($"[AC23.Recv15] Quick refill applied by {p.CharName}: Slot {pos}, Target {target}, +{hpGain * count} HP, +{spGain * count} SP");
+                    p.Send(Tools.FromFormat("bbdw", 5, 1, p.CharID, (ushort)(p.Eqs != null ? p.Eqs.CurHP : 0)));
                 }
+                else if (p.PlayerPets != null)
+                {
+                    byte petSlot = (byte)target;
+                    Player.PlayerPetData pet = null;
+                    if (p.PlayerPets.TryGetValue(petSlot, out var pPet)) pet = pPet;
+                    else if (petSlot > 0 && p.PlayerPets.TryGetValue((byte)(petSlot - 1), out var pPet0)) pet = pPet0;
+                    else if (p.PlayerPets.Values.Any(x => x.IsBattle)) pet = p.PlayerPets.Values.FirstOrDefault(x => x.IsBattle);
+
+                    if (pet == null)
+                    {
+                        SendItemMessage(p, "The selected pet could not be found; item was not consumed.");
+                        return;
+                    }
+
+                    pet.HP = Math.Min(pet.MaxHP, pet.HP + hpGain * useCount);
+                    pet.SP = Math.Min(pet.MaxSP, pet.SP + spGain * useCount);
+                    p.Send(Tools.FromFormat("bbbbdd", 8, 2, 25, petSlot, (uint)pet.HP, 0));
+                    p.Send(Tools.FromFormat("bbbbdd", 8, 2, 26, petSlot, (uint)pet.SP, 0));
+                    p.Send(Tools.FromFormat("bbdw", 5, 1, pet.PetID, (ushort)pet.HP));
+                }
+
+                p.Inv.RemoveItem(pos, useCount);
+                p.SaveCharacterData();
+                DebugSystem.Write($"[AC23.Recv15] Quick refill by {p.CharName}: Slot {pos}, Target {target}, Count {useCount}, +{hpGain * useCount} HP, +{spGain * useCount} SP");
             }
-            catch (Exception t) { DebugSystem.Write(new ExceptionData(t)); }
+            catch (Exception t)
+            {
+                DebugSystem.Write(new ExceptionData(t));
+                try { p?.Inv?.SendFullSync(); } catch { }
+            }
         }
 
         void Recv124(Player p, RecievePacket r)
@@ -519,21 +531,22 @@ namespace Network.ActionCodes
             {
                 byte pos = r.Unpack8();
                 byte qnt = r.Unpack8();
-                byte ukn = r.Unpack8(); //??
+                byte ukn = r.Unpack8();
+                if (pos < 1 || pos > 50 || qnt == 0) return;
+
                 var item = p.Inv[pos];
-                if (item != null)
-                {
-                    // test confirm destroy item
-                    SendPacket s = new SendPacket();
-                    s.PackArray(new byte[] { 23, 26 });
-                    s.Pack16(item.ItemID);
-                    s.Pack8(qnt);
-                    p.Send(s);
-                    p.Inv.RemoveItem(pos, qnt);
-                    p.SaveCharacterData();
-                }
+                if (item == null || item.ItemID == 0) return;
+
+                SendPacket s = new SendPacket();
+                s.PackArray(new byte[] { 23, 26 });
+                s.Pack16(item.ItemID);
+                s.Pack8(qnt);
+                p.Send(s);
+
+                p.Inv.RemoveItem(pos, qnt);
+                p.SaveCharacterData();
             }
-            catch (Exception t) { Console.WriteLine(t); }
+            catch (Exception t) { DebugSystem.Write(new ExceptionData(t)); }
         }
     }
 }
