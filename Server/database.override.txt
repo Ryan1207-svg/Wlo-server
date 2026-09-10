@@ -4,4 +4,4 @@ Pass|
 DB|
 Port|
 IP|
-File|C:\Users\Ryans\Desktop\WLO PRIVATE SERVER\Server\Data\ServerDataBase.db
+File|..\..\Data\ServerDataBase.db
