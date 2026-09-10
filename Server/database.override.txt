@@ -1,0 +1,7 @@
+Type|1
+User|
+Pass|
+DB|
+Port|
+IP|
+File|C:\Users\Ryans\Desktop\WLO PRIVATE SERVER\Server\Data\ServerDataBase.db

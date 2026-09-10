@@ -1,0 +1,101 @@
+################################################################################
+# .gitignore - Wonderland Online Private Server (.NET Framework / C#)
+################################################################################
+
+# ==============================================================================
+# Visual Studio / IDE / User-specific files
+# ==============================================================================
+.vs/
+.vscode/
+.idea/
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.suo
+*.ide/
+*.psess
+*.vsp
+*.vspx
+
+# ==============================================================================
+# Build outputs and compilation binaries (All projects)
+# ==============================================================================
+[Bb]in/
+[Oo]bj/
+[Dd]ebug/
+[Rr]elease/
+x64/Debug/
+x64/Release/
+x86/Debug/
+x86/Release/
+bld/
+[Bb]uild[Ll]og.txt
+
+# Debug symbols & compiler artifacts
+*.pdb
+*.ilk
+*.exp
+*.idb
+*.ipch
+*.pch
+
+# Build output binaries
+# Note: Third-party dependencies in DLLS/ and unmanaged Interop DLLs are kept
+bin/
+*/bin/
+*/obj/
+
+# ==============================================================================
+# NuGet Packages & Cache
+# ==============================================================================
+*.nupkg
+*.snupkg
+**/packages/*
+!**/packages/build/
+*.nuget.props
+*.nuget.targets
+**/project.assets.json
+**/project.nuget.cache
+**/DesignTimeResolveAssemblyReferencesInput.cache
+**/obj/**/*.nuget.*
+
+# ==============================================================================
+# Logs & Diagnostic Outputs
+# ==============================================================================
+[Ll]og/
+[Ll]ogs/
+*.log
+*logFile*.txt
+*LogFile*.txt
+bin/Debug/Logs/
+
+# ==============================================================================
+# Runtime Databases & Temporary Storage
+# ==============================================================================
+*.db-shm
+*.db-wal
+*.db-journal
+*.db.temp
+ServerDataBase.db.temp
+bin/**/ServerDataBase.db
+
+# ==============================================================================
+# Client Archives & Development Scripts
+# ==============================================================================
+odd.dat
+*.odd
+update.rar
+dev_scripts/
+
+# ==============================================================================
+# Screenshots & Downloaded Media
+# ==============================================================================
+screenshot.png
+*.png
+!Resources/**
+*.jpg
+*.jpeg
+*.bmp
+*.webp
+
