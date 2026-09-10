@@ -47,6 +47,30 @@ namespace Game.PlayerRelated
             SubCategoryID = 1;
             CategoryID = ItemMallManager.ResolveCategoryId(category);
         }
+
+        public MallItemEntry Clone()
+        {
+            return new MallItemEntry
+            {
+                ItemID = ItemID,
+                ItemName = ItemName,
+                Category = Category,
+                PointCost = PointCost,
+                OriginalPrice = OriginalPrice,
+                GoldCost = GoldCost,
+                Count = Count,
+                IsHot = IsHot,
+                IsNew = IsNew,
+                IsLimited = IsLimited,
+                OnSale = OnSale,
+                Discount = Discount,
+                Badge = Badge,
+                CategoryID = CategoryID,
+                OrderIndex = OrderIndex,
+                IsBonus = IsBonus,
+                SubCategoryID = SubCategoryID
+            };
+        }
     }
 
     public static class ItemMallManager
@@ -95,26 +119,7 @@ namespace Game.PlayerRelated
             lock (_lock)
             {
                 var src = isBonus ? _bonusCatalog : _pointsCatalog;
-                return src.Select(x => new MallItemEntry
-                {
-                    ItemID = x.ItemID,
-                    ItemName = x.ItemName,
-                    Category = x.Category,
-                    PointCost = x.PointCost,
-                    OriginalPrice = x.OriginalPrice,
-                    GoldCost = x.GoldCost,
-                    Count = x.Count,
-                    IsHot = x.IsHot,
-                    IsNew = x.IsNew,
-                    IsLimited = x.IsLimited,
-                    OnSale = x.OnSale,
-                    Discount = x.Discount,
-                    Badge = x.Badge,
-                    CategoryID = x.CategoryID,
-                    OrderIndex = x.OrderIndex,
-                    IsBonus = x.IsBonus,
-                    SubCategoryID = x.SubCategoryID
-                }).ToList();
+                return src.Select(x => x.Clone()).ToList();
             }
         }
 
@@ -123,17 +128,49 @@ namespace Game.PlayerRelated
             return GetCatalog(false);
         }
 
+        /// <summary>
+        /// Returns the first advertised entry for an item ID. Item IDs are not unique in
+        /// the WLO mall because the same item can be advertised as single and bundle rows.
+        /// </summary>
         public static MallItemEntry GetItem(ushort itemId, bool isBonus = false)
         {
             lock (_lock)
             {
-                var map = isBonus ? _bonusMap : _pointsMap;
-                if (map.TryGetValue(itemId, out var entry))
-                {
-                    return entry;
-                }
                 var list = isBonus ? _bonusCatalog : _pointsCatalog;
-                return list.FirstOrDefault(i => i.ItemID == itemId);
+                return list.Where(i => i.ItemID == itemId)
+                           .OrderBy(i => i.OrderIndex)
+                           .FirstOrDefault();
+            }
+        }
+
+        /// <summary>
+        /// Resolves a direct client purchase by the advertised bundle count when possible.
+        /// This fixes duplicate IDs such as Potential Pill (single and x5 rows).
+        /// </summary>
+        public static MallItemEntry GetItem(ushort itemId, byte advertisedCount, bool isBonus)
+        {
+            lock (_lock)
+            {
+                var list = isBonus ? _bonusCatalog : _pointsCatalog;
+                var matches = list.Where(i => i.ItemID == itemId).OrderBy(i => i.OrderIndex).ToList();
+                if (matches.Count == 0) return null;
+
+                if (advertisedCount > 0)
+                {
+                    var exact = matches.FirstOrDefault(i => Math.Max((byte)1, i.Count) == advertisedCount);
+                    if (exact != null) return exact;
+                }
+                return matches[0];
+            }
+        }
+
+        public static MallItemEntry GetCatalogEntry(int index, bool isBonus = false)
+        {
+            lock (_lock)
+            {
+                var list = isBonus ? _bonusCatalog : _pointsCatalog;
+                if (index < 0 || index >= list.Count) return null;
+                return list[index].Clone();
             }
         }
 
@@ -150,10 +187,7 @@ namespace Game.PlayerRelated
                 if (newCatalog != null)
                 {
                     targetList.AddRange(newCatalog);
-                    foreach (var it in targetList)
-                    {
-                        targetMap[it.ItemID] = it;
-                    }
+                    RebuildMap(targetList, targetMap);
                 }
             }
             SaveToFile();
@@ -167,7 +201,8 @@ namespace Game.PlayerRelated
                 var targetList = isBonus ? _bonusCatalog : _pointsCatalog;
                 var targetMap = isBonus ? _bonusMap : _pointsMap;
 
-                var existing = targetList.FirstOrDefault(i => i.ItemID == itemId);
+                // Match ID + bundle size so single and pack listings can coexist.
+                var existing = targetList.FirstOrDefault(i => i.ItemID == itemId && Math.Max((byte)1, i.Count) == Math.Max((byte)1, count));
                 if (existing != null)
                 {
                     existing.ItemName = name;
@@ -184,8 +219,8 @@ namespace Game.PlayerRelated
                         IsBonus = (byte)(isBonus ? 1 : 0)
                     };
                     targetList.Add(entry);
-                    targetMap[itemId] = entry;
                 }
+                RebuildMap(targetList, targetMap);
             }
             SaveToFile();
             OnCatalogChanged?.Invoke();
@@ -235,7 +270,7 @@ namespace Game.PlayerRelated
                 var targetMap = isBonus ? _bonusMap : _pointsMap;
 
                 int count = targetList.RemoveAll(i => i.ItemID == itemId);
-                targetMap.Remove(itemId);
+                RebuildMap(targetList, targetMap);
                 removed = count > 0;
             }
             if (removed)
@@ -251,6 +286,17 @@ namespace Game.PlayerRelated
             return RemoveItem(itemId, false);
         }
 
+        private static void RebuildMap(List<MallItemEntry> source, Dictionary<int, MallItemEntry> target)
+        {
+            target.Clear();
+            foreach (var group in source.GroupBy(i => i.ItemID))
+            {
+                // Keep the first advertised row as the legacy ID lookup, never silently
+                // overwrite it with a later bundle row.
+                target[group.Key] = group.OrderBy(i => i.OrderIndex).First();
+            }
+        }
+
         // -------------------------------------------------------------
         // User Points & Bonus Points Management
         // -------------------------------------------------------------
@@ -264,10 +310,7 @@ namespace Game.PlayerRelated
         {
             if (player?.UserAccount == null) return;
             player.UserAccount.IM = Math.Max(0, points);
-            try
-            {
-                OnPointsChanged?.Invoke(player.UserAccount.DataBaseID, player.UserAccount.IM);
-            }
+            try { OnPointsChanged?.Invoke(player.UserAccount.DataBaseID, player.UserAccount.IM); }
             catch { }
             SendPointBalance(player);
         }
@@ -276,10 +319,7 @@ namespace Game.PlayerRelated
         {
             if (player?.UserAccount == null) return;
             player.UserAccount.IM = Math.Max(0, player.UserAccount.IM + points);
-            try
-            {
-                OnPointsChanged?.Invoke(player.UserAccount.DataBaseID, player.UserAccount.IM);
-            }
+            try { OnPointsChanged?.Invoke(player.UserAccount.DataBaseID, player.UserAccount.IM); }
             catch { }
             SendPointBalance(player);
         }
@@ -294,10 +334,7 @@ namespace Game.PlayerRelated
         {
             if (player?.UserAccount == null) return;
             player.UserAccount.IMBonus = Math.Max(0, bonusPoints);
-            try
-            {
-                OnBonusPointsChanged?.Invoke(player.UserAccount.DataBaseID, player.UserAccount.IMBonus);
-            }
+            try { OnBonusPointsChanged?.Invoke(player.UserAccount.DataBaseID, player.UserAccount.IMBonus); }
             catch { }
             SendPointBalance(player);
         }
@@ -306,22 +343,14 @@ namespace Game.PlayerRelated
         {
             if (player?.UserAccount == null) return;
             player.UserAccount.IMBonus = Math.Max(0, player.UserAccount.IMBonus + bonusPoints);
-            try
-            {
-                OnBonusPointsChanged?.Invoke(player.UserAccount.DataBaseID, player.UserAccount.IMBonus);
-            }
+            try { OnBonusPointsChanged?.Invoke(player.UserAccount.DataBaseID, player.UserAccount.IMBonus); }
             catch { }
             SendPointBalance(player);
         }
 
         // -------------------------------------------------------------
-        // Protocol Serialization (Port 6414)
+        // Protocol Serialization
         // -------------------------------------------------------------
-        /// <summary>
-        /// Native Client Mall Points Packet: S->C AC 75 Sub 3
-        /// Payload: [75, 3, im_points(uint32), bonus_points(uint32), 0(uint16), 0(uint8)]
-        /// Total length: 13 bytes. Authentic pcap layout (itemmalldatalari.pcapng).
-        /// </summary>
         public static void SendPointBalance(Player player)
         {
             if (player == null || player.UserAccount == null) return;
@@ -346,19 +375,6 @@ namespace Game.PlayerRelated
             }
         }
 
-        /// <summary>
-        /// Dispatches authentic Item Mall catalog:
-        /// - Points Mall: S->C AC 75 Sub 1 (152 authentic items)
-        /// - Bonus Mall:  S->C AC 75 Sub 10 (71 authentic items)
-        /// Each item is exactly 10 bytes:
-        ///   [0-1] item_id (uint16_LE)
-        ///   [2]   count (uint8: 1 for single, 5/20/50 for bundle)
-        ///   [3-4] base_price / original_price (uint16_LE)
-        ///   [5]   discount percentage (uint8: 100=no sale, 80=20% off)
-        ///   [6]   badge tag (uint8: 0=normal, 1=NEW, 2=HOT, 3=LIMITED)
-        ///   [7]   category_id (uint8: 1=Weaponry, 2=Armory, 3=Grocery single, 4=Grocery pack, 5=Furniture)
-        ///   [8-9] order_idx (uint16_LE: display ordering index)
-        /// </summary>
         public static void SendCatalog(Player player, bool isBonus = false)
         {
             if (player == null) return;
@@ -375,16 +391,14 @@ namespace Game.PlayerRelated
                 foreach (var item in catalog)
                 {
                     pMall.Pack16(item.ItemID);
-                    pMall.Pack8(Math.Max((byte)1, item.Count));
+                    pMall.Pack8(item.Count > 0 ? item.Count : (byte)1);
 
                     ushort basePrice = (ushort)Math.Min(65535, item.OriginalPrice > 0 ? item.OriginalPrice : item.PointCost);
                     pMall.Pack16(basePrice);
 
                     byte disc = item.Discount > 0 ? item.Discount : (byte)100;
                     if (disc >= 100 && item.OnSale > 0 && item.OriginalPrice > item.PointCost && item.OriginalPrice > 0)
-                    {
                         disc = (byte)Math.Max(1, Math.Min(99, (item.PointCost * 100) / item.OriginalPrice));
-                    }
                     pMall.Pack8(disc);
 
                     byte badge = item.Badge;
@@ -417,14 +431,6 @@ namespace Game.PlayerRelated
             SendCatalog(player, false);
         }
 
-        /// <summary>
-        /// Sends authentic map-entry / mall initialization sequence:
-        /// 1. AC 75 Sub 1 (Points Mall catalog: 152 items)
-        /// 2. AC 75 Sub 10 (Bonus Mall catalog: 71 items)
-        /// 3. AC 75 Sub 8 (Mall settings: [75, 8, 0, 0])
-        /// 4. AC 75 Sub 7 (Mall status: [75, 7, 1])
-        /// 5. AC 75 Sub 3 (Points & Bonus Points balance: 13 bytes)
-        /// </summary>
         public static void SendInitialMallSync(Player player)
         {
             if (player == null) return;
@@ -458,19 +464,20 @@ namespace Game.PlayerRelated
         // -------------------------------------------------------------
         // Item Mall Purchasing Logic
         // -------------------------------------------------------------
-        public static bool PurchaseItem(Player player, ushort itemId, byte quantity = 1, bool isBonus = false)
+        public static bool PurchaseEntry(Player player, MallItemEntry entry, byte packageQuantity = 1, bool isBonus = false)
         {
-            if (player == null || player.UserAccount == null) return false;
-            if (quantity <= 0) quantity = 1;
+            if (player == null || player.UserAccount == null || player.Inv == null || entry == null) return false;
+            if (packageQuantity == 0) packageQuantity = 1;
 
-            MallItemEntry entry = GetItem(itemId, isBonus);
-            if (entry == null)
+            int unitsRequested = Math.Max(1, entry.Count) * packageQuantity;
+            if (unitsRequested > byte.MaxValue)
             {
-                SendSystemMsg(player, "The selected item is no longer available in the Item Mall.");
+                SendSystemMsg(player, "That purchase contains too many items for one transaction.");
+                DebugSystem.Write($"[ItemMall] Rejected oversized purchase #{entry.ItemID}: {unitsRequested} units.");
                 return false;
             }
 
-            int totalCost = entry.PointCost * quantity;
+            int totalCost = entry.PointCost * packageQuantity;
             int currentBalance = isBonus ? GetUserBonusPoints(player) : GetUserPoints(player);
             string pointLabel = isBonus ? "Bonus Points" : "IM Points";
 
@@ -480,21 +487,35 @@ namespace Game.PlayerRelated
                 return false;
             }
 
-            // Deduct Points
+            int capacity = player.Inv.GetAddCapacity(entry.ItemID);
+            if (capacity < unitsRequested)
+            {
+                SendSystemMsg(player, $"Not enough inventory space for {unitsRequested}x {entry.ItemName}. Required capacity: {unitsRequested}, available: {capacity}.");
+                DebugSystem.Write($"[ItemMall] Inventory capacity check failed for {player.CharName}: #{entry.ItemID} requested={unitsRequested}, capacity={capacity}.");
+                return false;
+            }
+
+            // Delivery happens before charging. If Item.dat resolution or insertion fails,
+            // the player keeps every point and any partial delivery is rolled back.
+            int added = player.Inv.AddItemWithResult(entry.ItemID, (byte)unitsRequested, true);
+            if (added != unitsRequested)
+            {
+                if (added > 0)
+                    player.Inv.RemoveItem(entry.ItemID, (byte)Math.Min(byte.MaxValue, added));
+
+                player.Inv.SendFullSync();
+                SendSystemMsg(player, $"Purchase failed while delivering {entry.ItemName}; no points were charged.");
+                DebugSystem.Write($"[ItemMall] DELIVERY FAILED Player={player.CharName} Item=#{entry.ItemID} Requested={unitsRequested} Added={added}. Points unchanged.");
+                return false;
+            }
+
             if (isBonus)
-            {
                 SetUserBonusPoints(player, currentBalance - totalCost);
-            }
             else
-            {
                 SetUserPoints(player, currentBalance - totalCost);
-            }
 
-            // Deliver Item to Inventory
-            byte totalItemCount = (byte)Math.Min(255, entry.Count * quantity);
-            player.Inv.AddItem(entry.ItemID, totalItemCount);
+            player.SaveCharacterData();
 
-            // Revert disguise to normal model if disguised
             SendPacket pRestore = new SendPacket();
             pRestore.Pack8(5);
             pRestore.Pack8(5);
@@ -502,13 +523,38 @@ namespace Game.PlayerRelated
             pRestore.Pack16(0);
             player.CurMap?.Broadcast(pRestore);
 
-            // Sync updated balance
             SendPointBalance(player);
 
             int remaining = isBonus ? GetUserBonusPoints(player) : GetUserPoints(player);
-            SendSystemMsg(player, $"🎉 Successfully purchased {totalItemCount}x {entry.ItemName} for {totalCost} {pointLabel}! (Remaining: {remaining})");
-            DebugSystem.Write($"[ItemMall] Player {player.CharName} purchased {quantity}x #{itemId} ({entry.ItemName}) for {totalCost} {pointLabel}.");
+            SendSystemMsg(player, $"Successfully purchased {unitsRequested}x {entry.ItemName} for {totalCost} {pointLabel}! (Remaining: {remaining})");
+            DebugSystem.Write($"[ItemMall] SUCCESS Player={player.CharName} Item=#{entry.ItemID} Name='{entry.ItemName}' Bundle={entry.Count} Packages={packageQuantity} Units={unitsRequested} Cost={totalCost} {pointLabel}.");
             return true;
+        }
+
+        public static bool PurchaseItem(Player player, ushort itemId, byte quantity = 1, bool isBonus = false)
+        {
+            MallItemEntry entry = GetItem(itemId, isBonus);
+            if (entry == null)
+            {
+                SendSystemMsg(player, "The selected item is no longer available in the Item Mall.");
+                return false;
+            }
+            return PurchaseEntry(player, entry, quantity, isBonus);
+        }
+
+        /// <summary>
+        /// Direct Rhode Island purchase packets include item ID and advertised item count.
+        /// Resolve that exact catalog row when duplicate IDs represent different bundle sizes.
+        /// </summary>
+        public static bool PurchaseAdvertisedItem(Player player, ushort itemId, byte advertisedCount, bool isBonus = false)
+        {
+            MallItemEntry entry = GetItem(itemId, advertisedCount, isBonus);
+            if (entry == null)
+            {
+                SendSystemMsg(player, "The selected item is no longer available in the Item Mall.");
+                return false;
+            }
+            return PurchaseEntry(player, entry, 1, isBonus);
         }
 
         public static bool PurchaseItem(Player player, ushort itemId, byte quantity = 1)
@@ -562,7 +608,6 @@ namespace Game.PlayerRelated
 
                 if (dt == null || dt.Rows.Count == 0)
                 {
-                    // Table empty: seed from JSON/TXT files
                     SeedDatabaseFromFiles();
                     dt = RCLibrary.Core.DataBase.Query("SELECT * FROM item_mall ORDER BY order_idx, item_id;");
                 }
@@ -600,27 +645,51 @@ namespace Game.PlayerRelated
                             };
 
                             if (entry.IsBonus > 0)
-                            {
                                 _bonusCatalog.Add(entry);
-                                _bonusMap[entry.ItemID] = entry;
-                            }
                             else
-                            {
                                 _pointsCatalog.Add(entry);
-                                _pointsMap[entry.ItemID] = entry;
-                            }
                         }
                     }
 
                     _pointsCatalog.Sort((a, b) => a.OrderIndex.CompareTo(b.OrderIndex));
                     _bonusCatalog.Sort((a, b) => a.OrderIndex.CompareTo(b.OrderIndex));
+                    RebuildMap(_pointsCatalog, _pointsMap);
+                    RebuildMap(_bonusCatalog, _bonusMap);
                 }
 
+                ValidateCatalog(_pointsCatalog, "Points");
+                ValidateCatalog(_bonusCatalog, "Bonus");
                 DebugSystem.Write($"[ItemMall] Successfully loaded {_pointsCatalog.Count} Points Mall items and {_bonusCatalog.Count} Bonus Mall items from SQLite database.");
             }
             catch (Exception ex)
             {
                 DebugSystem.Write($"[ItemMall] Error loading from database: {ex.Message}");
+            }
+        }
+
+        private static void ValidateCatalog(List<MallItemEntry> catalog, string label)
+        {
+            if (catalog == null) return;
+
+            foreach (var entry in catalog)
+            {
+                if (entry.ItemID == 0)
+                    DebugSystem.Write($"[ItemMall VALIDATION] {label} entry order {entry.OrderIndex} has ItemID 0.");
+                if (entry.Count == 0)
+                    DebugSystem.Write($"[ItemMall VALIDATION] {label} entry #{entry.ItemID} '{entry.ItemName}' has Count=0; client will treat it as 1.");
+                if (entry.PointCost < 0)
+                    DebugSystem.Write($"[ItemMall VALIDATION] {label} entry #{entry.ItemID} '{entry.ItemName}' has negative cost {entry.PointCost}.");
+            }
+
+            foreach (var dup in catalog.GroupBy(x => new { x.ItemID, x.Count }).Where(g => g.Count() > 1))
+            {
+                DebugSystem.Write($"[ItemMall VALIDATION] Duplicate identical listing ItemID={dup.Key.ItemID}, Count={dup.Key.Count}, Rows={dup.Count()}.");
+            }
+
+            foreach (var bundle in catalog.GroupBy(x => x.ItemID).Where(g => g.Count() > 1))
+            {
+                string variants = string.Join(", ", bundle.OrderBy(x => x.OrderIndex).Select(x => $"x{x.Count}@{x.PointCost} (order {x.OrderIndex})"));
+                DebugSystem.Write($"[ItemMall] Item #{bundle.Key} has bundle variants: {variants}");
             }
         }
 
@@ -657,7 +726,6 @@ namespace Game.PlayerRelated
 
             if (parsedItems == null || parsedItems.Count == 0)
             {
-                // Hardcoded minimum fallback
                 parsedItems = new List<MallItemEntry>
                 {
                     new MallItemEntry(47010, "Brilliant Diamond (+42 Stats)", "Gems", 250, 1),
@@ -670,9 +738,8 @@ namespace Game.PlayerRelated
             }
 
             foreach (var it in parsedItems)
-            {
                 SaveItemToDatabase(it);
-            }
+
             DebugSystem.Write($"[ItemMall] Seeded {parsedItems.Count} items into SQLite database.");
         }
 
@@ -753,7 +820,7 @@ namespace Game.PlayerRelated
 
         public static void SaveToFile()
         {
-            // Backward-compatible alias for saving to database
+            // Backward-compatible behavior: refresh the in-memory catalog from SQLite.
             LoadFromDatabase();
         }
 
