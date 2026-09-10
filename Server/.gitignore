@@ -71,7 +71,7 @@ bin/
 bin/Debug/Logs/
 
 # ==============================================================================
-# Runtime Databases & Temporary Storage
+# Runtime Databases, local overrides & temporary storage
 # ==============================================================================
 *.db-shm
 *.db-wal
@@ -79,6 +79,10 @@ bin/Debug/Logs/
 *.db.temp
 ServerDataBase.db.temp
 bin/**/ServerDataBase.db
+Data/ServerDataBase.db
+database.override.txt
+**/database.override.txt
+*.backup
 
 # ==============================================================================
 # Client Archives & Development Scripts
@@ -98,4 +102,3 @@ screenshot.png
 *.jpeg
 *.bmp
 *.webp
-

@@ -8,13 +8,11 @@ using DataFiles;
 using Network;
 using RCLibrary.Core.Networking;
 
-
 namespace Game.Code
 {
     public class Inventory
     {
         global::DataFiles.PhxItemDat ItemDat;
-
 
         Player owner;
         private readonly object mylock;
@@ -50,11 +48,9 @@ namespace Game.Code
                     this[loc].Clear();
                     return i;
                 }
-                else
-                    return null;
-            }
-            else
                 return null;
+            }
+            return null;
         }
 
         public bool onUnEquip(Item src, byte loc, bool senddata)
@@ -85,12 +81,9 @@ namespace Game.Code
         public void RemoveItemAtSlot(byte loc, byte ammt = 1)
         {
             if (loc > 0 && loc <= 50)
-            {
                 RemoveItem(loc, ammt);
-            }
         }
         #endregion
-
 
         public bool ContainsItem(ushort ItemID)
         {
@@ -104,12 +97,7 @@ namespace Game.Code
                 return false;
             }
         }
-        /// <summary>
-        /// Used to check if an item exists in the list
-        /// </summary>
-        /// <param name="ItemID"></param>
-        /// <param name="slot"></param>
-        /// <returns>true if exists and returns the first slot location of the item</returns>
+
         public bool ContainsItem(ushort ItemID, out byte slot)
         {
             lock (mylock)
@@ -135,9 +123,7 @@ namespace Game.Code
                 for (byte a = 1; a < 51; a++)
                 {
                     if (this[a].ItemID == ItemID)
-                    {
                         total += Math.Max(1, (int)this[a].Ammt);
-                    }
                 }
                 return total;
             }
@@ -151,6 +137,129 @@ namespace Game.Code
                 return true;
             }
             return false;
+        }
+
+        /// <summary>
+        /// Builds the Rhode Island client slot-state packet confirmed elsewhere in the
+        /// protocol implementation (AC 23:8): slot, item id, quantity, 28 reserved bytes.
+        /// AC 23:6 is only an acquisition/banner packet and does not identify a bag slot.
+        /// </summary>
+        private SendPacket BuildSlotStatePacket(byte slot)
+        {
+            if (slot < 1 || slot > 50) return null;
+            var current = this[slot];
+            if (current == null || current.ItemID == 0) return null;
+
+            SendPacket pkt = new SendPacket();
+            pkt.Pack8(23);
+            pkt.Pack8(8);
+            pkt.Pack8(slot);
+            pkt.Pack16(current.ItemID);
+            pkt.Pack8(Math.Max((byte)1, current.Ammt));
+            pkt.PackArray(new byte[28]);
+            return pkt;
+        }
+
+        private void SendAcquisitionPacket(ushort itemId, int amount)
+        {
+            if (owner == null || itemId == 0 || amount <= 0) return;
+
+            SendPacket pkt = new SendPacket();
+            pkt.Pack8(23);
+            pkt.Pack8(6);
+            pkt.Pack16(itemId);
+            pkt.Pack8((byte)Math.Min(255, amount));
+            pkt.PackArray(new byte[28]);
+            owner.Send(pkt);
+        }
+
+        /// <summary>
+        /// Pushes the authoritative state of a single occupied inventory slot.
+        /// </summary>
+        public void SendSlotState(byte slot)
+        {
+            lock (mylock)
+            {
+                if (owner == null) return;
+                var pkt = BuildSlotStatePacket(slot);
+                if (pkt != null)
+                    owner.Send(pkt);
+            }
+        }
+
+        /// <summary>
+        /// Sends both the legacy AC23:5 snapshot and explicit AC23:8 slot packets.
+        /// The Rhode Island client used by this server has been observed to require the
+        /// explicit slot packets even when the snapshot is present.
+        /// </summary>
+        public void SendFullSync()
+        {
+            lock (mylock)
+            {
+                if (owner == null) return;
+
+                owner.Send(new SendPacket(GetAC23_5()));
+                for (byte slot = 1; slot <= 50; slot++)
+                {
+                    var pkt = BuildSlotStatePacket(slot);
+                    if (pkt != null)
+                        owner.Send(pkt);
+                }
+            }
+        }
+
+        private PhxItemInfo ResolveItemInfo(ushort itemId)
+        {
+            if (itemId == 0 || ItemDat == null) return null;
+            try
+            {
+                return ItemDat.GetItemByID(itemId);
+            }
+            catch (Exception ex)
+            {
+                DebugSystem.Write($"[Inventory] Failed to resolve Item.dat entry #{itemId}: {ex.Message}");
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Returns how many units of the supplied item can currently fit without mutating
+        /// inventory. Used by Item Mall and reward systems to avoid partial deliveries.
+        /// </summary>
+        public int GetAddCapacity(ushort itemId)
+        {
+            var info = ResolveItemInfo(itemId);
+            if (info == null) return 0;
+
+            InvItem item = new InvItem();
+            item.CopyFrom(info);
+            item.Ammt = 1;
+            return GetAddCapacity(item);
+        }
+
+        public int GetAddCapacity(Item item)
+        {
+            lock (mylock)
+            {
+                if (item == null || item.ItemID == 0) return 0;
+
+                int capacity = 0;
+                for (byte slot = 1; slot <= 50; slot++)
+                {
+                    var cur = this[slot];
+                    if (cur == null) continue;
+
+                    if (cur.ItemID == 0)
+                    {
+                        capacity += item.Stackable ? 50 : 1;
+                    }
+                    else if (item.Stackable && cur.ItemID == item.ItemID)
+                    {
+                        capacity += Math.Max(0, cur.SpaceLeft);
+                    }
+                }
+                return capacity;
+            }
         }
 
         /// <summary>
@@ -171,7 +280,6 @@ namespace Game.Code
                             item.Damage = 100;
                             RemoveItem(slot, 1);
 
-                            // Send Raft Wreck Animation (AC 15:15)
                             SendPacket wreck = new SendPacket();
                             wreck.Pack8(15);
                             wreck.Pack8(15);
@@ -180,7 +288,6 @@ namespace Game.Code
                             owner.Send(wreck);
                             owner.CurMap?.Broadcast(wreck);
 
-                            // Dismount player
                             owner.ActiveVehicleID = 0;
                             owner.RideVehicle("");
                             owner.SaveCharacterData();
@@ -189,127 +296,137 @@ namespace Game.Code
                         else
                         {
                             item.Damage = (byte)newDmg;
-                            owner.Send(new SendPacket(GetAC23_5()));
+                            SendSlotState(slot);
                         }
                     }
                 }
             }
         }
-        /// <summary>
-        /// Clears the Inventory
-        /// </summary>
+
         public void RemoveAll(bool force)
         {
             lock (mylock)
             {
                 for (byte a = 1; a < 51; a++)
+                {
                     if (!force)
                     {
                         if (this[a].ItemID > 0)
-                            RemoveItem((byte)(a), this[a].Ammt);
+                            RemoveItem(a, this[a].Ammt);
                     }
                     else
+                    {
                         this[a].Clear();
+                    }
+                }
             }
         }
+
         /// <summary>
-        /// Removes and Item from the Inventory
+        /// Removes units from a slot and keeps server/client quantity in agreement.
+        /// The returned item contains only the quantity actually removed (important for
+        /// partial stack moves; the old implementation returned the entire source stack).
         /// </summary>
-        /// <param name="at"></param>
-        /// <param name="ammt"></param>
-        /// <param name="senddata"></param>
-        /// <returns>the Item Removed</returns>
         public InvItem RemoveItem(byte at, byte ammt, bool senddata = true)
         {
             lock (mylock)
             {
-                if (at < 1 || at > 50) return null;
-                InvItem remItem = new InvItem();
-                remItem.CopyFrom(this[at]);
+                if (at < 1 || at > 50 || ammt == 0) return null;
+                var source = this[at];
+                if (source == null || source.ItemID == 0) return null;
+
                 try
                 {
-                    if (remItem.ItemID > 0)
+                    byte removedAmount = (byte)Math.Min(source.Ammt, ammt);
+                    InvItem remItem = new InvItem();
+                    remItem.CopyFrom(source);
+                    remItem.Ammt = removedAmount;
+
+                    if (source.Ammt <= removedAmount)
+                        source.Clear();
+                    else
+                        source.Ammt -= removedAmount;
+
+                    if (senddata && owner != null)
                     {
-                        if (this[at].Ammt <= ammt)
-                        {
-                            this[at].Clear();
-                        }
-                        else
-                        {
-                            this[at].Ammt -= ammt;
-                        }
-                        if (senddata && owner != null)
-                        {
-                            owner.Send(Tools.FromFormat("bbbb", 23, 9, at, ammt));
-                            owner.Send(new SendPacket(GetAC23_5()));
-                        }
-                        return remItem;
+                        owner.Send(Tools.FromFormat("bbbb", 23, 9, at, removedAmount));
+                        if (source.ItemID > 0)
+                            SendSlotState(at);
                     }
+                    return remItem;
                 }
-                catch (Exception e) { DebugSystem.Write(new ExceptionData(e)); }
-                return null;
+                catch (Exception e)
+                {
+                    DebugSystem.Write(new ExceptionData(e));
+                    return null;
+                }
             }
         }
+
         public bool RemoveItem(ushort itemId, byte count = 1)
         {
             lock (mylock)
             {
-                byte needed = count;
-                for (byte a = 1; a < 51; a++)
+                int needed = count;
+                for (byte a = 1; a < 51 && needed > 0; a++)
                 {
                     if (this[a].ItemID == itemId)
                     {
-                        byte toTake = Math.Min(this[a].Ammt, needed);
+                        byte toTake = (byte)Math.Min(this[a].Ammt, needed);
                         RemoveItem(a, toTake);
                         needed -= toTake;
-                        if (needed == 0) break;
                     }
                 }
-                owner?.Send(new SendPacket(GetAC23_5()));
                 return needed == 0;
             }
         }
+
         public void AddItem(ushort ID, byte amt)
         {
-            AddItem(ID, amt, true);
+            AddItemWithResult(ID, amt, true);
         }
+
         public void AddItem(ushort ID, byte amt, bool sendData)
         {
-            PhxItemInfo baseItem = null;
-            try
-            {
-                if (ItemDat != null)
-                {
-                    baseItem = ItemDat.GetItemByID(ID);
-                }
-            }
-            catch { }
+            AddItemWithResult(ID, amt, sendData);
+        }
 
+        /// <summary>
+        /// Adds an Item.dat item and returns the number of units actually inserted.
+        /// Unknown Item.dat IDs are rejected instead of creating ghost inventory records
+        /// that the client cannot render.
+        /// </summary>
+        public int AddItemWithResult(ushort ID, byte amt, bool sendData = true)
+        {
+            if (ID == 0 || amt == 0) return 0;
+
+            PhxItemInfo baseItem = ResolveItemInfo(ID);
             if (baseItem == null)
             {
-                baseItem = new PhxItemInfo() { ItemID = ID, ItemName = Encoding.ASCII.GetBytes("Item " + ID), cellwidth = 1, cellheight = 1 };
+                DebugSystem.Write($"[Inventory.AddItem] Rejected unknown Item.dat ID #{ID} for {owner?.CharName ?? "Unknown"}.");
+                return 0;
             }
+
             InvItem i = new InvItem();
             i.CopyFrom(baseItem);
             i.Ammt = amt;
-            AddItem(i, 0, sendData);
+            return AddItem(i, 0, sendData);
         }
+
         /// <summary>
-        /// Adds an item to the Inventory
+        /// Adds an item to the inventory. AC23:6 is retained as the acquisition/banner
+        /// notification, while AC23:8 sends the actual destination slot state.
         /// </summary>
-        /// <param name="item"></param>
-        /// <param name="at">default will choose next available space or tries to add at a specific place</param>
-        /// <param name="sendData">whether to send data to client</param>
         public int AddItem(Item item, byte at = 0, bool sendData = true)
         {
             lock (mylock)
             {
-                if (item == null || item.ItemID == 0) return 0;
+                if (item == null || item.ItemID == 0 || item.Ammt == 0) return 0;
 
                 int needed = item.Ammt;
                 int addedTotal = 0;
+                List<byte> touchedSlots = new List<byte>();
 
-                // Case 1: Specific slot requested
                 if (at >= 1 && at <= 50)
                 {
                     var target = this[at];
@@ -320,31 +437,25 @@ namespace Game.Code
                         int toPut = item.Stackable ? Math.Min(needed, 50) : 1;
                         target.Ammt = (byte)toPut;
                         addedTotal = toPut;
+                        touchedSlots.Add(at);
                     }
-                    else if (target.ItemID == item.ItemID && target.SpaceLeft > 0)
+                    else if (target.ItemID == item.ItemID && item.Stackable && target.SpaceLeft > 0)
                     {
                         int toStack = Math.Min(needed, target.SpaceLeft);
                         target.Ammt += (byte)toStack;
                         addedTotal = toStack;
+                        touchedSlots.Add(at);
                     }
 
                     if (addedTotal > 0 && sendData && owner != null)
                     {
-                        SendPacket tmp = new SendPacket();
-                        tmp.Pack8(23);
-                        tmp.Pack8(6);
-                        tmp.Pack16(item.ItemID);
-                        tmp.Pack8((byte)addedTotal);
-                        tmp.PackArray(new byte[28]);
-                        owner.Send(tmp);
-                        owner.Send(new SendPacket(GetAC23_5()));
-                        DebugSystem.Write($"[Inventory.AddItem] Placed item #{item.ItemID} x{addedTotal} into slot {at} for {owner?.CharName ?? "Unknown"}");
+                        SendAcquisitionPacket(item.ItemID, addedTotal);
+                        SendSlotState(at);
+                        DebugSystem.Write($"[Inventory.AddItem] Placed item #{item.ItemID} x{addedTotal} into slot {at} for {owner.CharName}");
                     }
                     return addedTotal;
                 }
 
-                // Case 2: Dynamic placement (at == 0)
-                // Pass 1: If stackable, stack onto existing stacks with SpaceLeft > 0
                 if (item.Stackable)
                 {
                     for (byte s = 1; s <= 50 && needed > 0; s++)
@@ -356,23 +467,12 @@ namespace Game.Code
                             cur.Ammt += (byte)toStack;
                             needed -= toStack;
                             addedTotal += toStack;
-
-                            if (sendData && owner != null)
-                            {
-                                SendPacket tmp = new SendPacket();
-                                tmp.Pack8(23);
-                                tmp.Pack8(6);
-                                tmp.Pack16(item.ItemID);
-                                tmp.Pack8((byte)toStack);
-                                tmp.PackArray(new byte[28]);
-                                owner.Send(tmp);
-                            }
+                            touchedSlots.Add(s);
                             DebugSystem.Write($"[Inventory.AddItem] Stacked item #{item.ItemID} x{toStack} onto slot {s} for {owner?.CharName ?? "Unknown"} (New Ammt: {cur.Ammt})");
                         }
                     }
                 }
 
-                // Pass 2: Place remaining into empty slots (ItemID == 0)
                 for (byte s = 1; s <= 50 && needed > 0; s++)
                 {
                     var cur = this[s];
@@ -384,57 +484,70 @@ namespace Game.Code
                         cur.Ammt = (byte)toPlace;
                         needed -= toPlace;
                         addedTotal += toPlace;
-
-                        if (sendData && owner != null)
-                        {
-                            SendPacket tmp = new SendPacket();
-                            tmp.Pack8(23);
-                            tmp.Pack8(6);
-                            tmp.Pack16(item.ItemID);
-                            tmp.Pack8((byte)toPlace);
-                            tmp.PackArray(new byte[28]);
-                            owner.Send(tmp);
-                        }
+                        touchedSlots.Add(s);
                         DebugSystem.Write($"[Inventory.AddItem] Added new item #{item.ItemID} x{toPlace} into slot {s} for {owner?.CharName ?? "Unknown"}");
                     }
                 }
 
                 if (addedTotal > 0 && sendData && owner != null)
                 {
-                    owner.Send(new SendPacket(GetAC23_5()));
+                    SendAcquisitionPacket(item.ItemID, addedTotal);
+                    foreach (byte slot in touchedSlots.Distinct())
+                        SendSlotState(slot);
                 }
+
+                if (needed > 0)
+                    DebugSystem.Write($"[Inventory.AddItem] Inventory capacity shortfall for #{item.ItemID}: requested {item.Ammt}, added {addedTotal}, remaining {needed} ({owner?.CharName ?? "Unknown"}).");
 
                 return addedTotal;
             }
         }
+
         /// <summary>
-        /// Moves and item in the Inventory List
+        /// Moves inventory data without losing or duplicating partial stacks.
         /// </summary>
-        /// <param name="from"></param>
-        /// <param name="to"></param>
-        /// <param name="ammt"></param>
         public void MoveItem(byte from, byte to, byte ammt)
         {
             lock (mylock)
             {
-                if (this[from].ItemID == 0 || from == to) return;
+                if (from < 1 || from > 50 || to < 1 || to > 50 || ammt == 0 || from == to) return;
 
-                SendPacket tmp = new SendPacket();
-                tmp.Pack8(23);
-                tmp.Pack8(10);
-                tmp.Pack8(from);
+                var source = this[from];
+                var destination = this[to];
+                if (source == null || source.ItemID == 0 || destination == null) return;
 
-                var item = RemoveItem(from, ammt, false);
-
-                if (item != null && (this[to].ItemID == 0 || (this[to].ItemID == item.ItemID)))
+                byte moveAmount = (byte)Math.Min(source.Ammt, ammt);
+                if (destination.ItemID != 0)
                 {
-                    byte wasplaced = (byte)AddItem(item, to, false);
-                    if (wasplaced > 0)
-                    {
-                        tmp.Pack8(wasplaced);
-                        tmp.Pack8(to);
-                        owner.Send(tmp);
-                    }
+                    if (destination.ItemID != source.ItemID || !source.Stackable || destination.SpaceLeft < moveAmount)
+                        return;
+                }
+
+                var moving = RemoveItem(from, moveAmount, false);
+                if (moving == null) return;
+
+                int placed = AddItem(moving, to, false);
+                if (placed != moveAmount)
+                {
+                    AddItem(moving, from, false);
+                    DebugSystem.Write($"[Inventory.MoveItem] Rolled back failed move {from}->{to} for {owner?.CharName ?? "Unknown"}.");
+                    SendFullSync();
+                    return;
+                }
+
+                if (owner != null)
+                {
+                    SendPacket tmp = new SendPacket();
+                    tmp.Pack8(23);
+                    tmp.Pack8(10);
+                    tmp.Pack8(from);
+                    tmp.Pack8(moveAmount);
+                    tmp.Pack8(to);
+                    owner.Send(tmp);
+
+                    if (this[from].ItemID > 0)
+                        SendSlotState(from);
+                    SendSlotState(to);
                 }
             }
         }
@@ -450,47 +563,41 @@ namespace Game.Code
 
             switch (b)
             {
-                #region move item inv
                 case 10:
-                    {
-                        byte src = p.Unpack8();
-                        byte ammt = p.Unpack8();
-                        byte dst = p.Unpack8();
-
-                        if (((src > 0) && (src < 51)) && ((dst > 0) && (dst < 51)) && ((ammt > 0) && (ammt < 51)))
-                            MoveItem(src, dst, ammt);
-                    }
+                {
+                    byte src = p.Unpack8();
+                    byte ammt = p.Unpack8();
+                    byte dst = p.Unpack8();
+                    if (src > 0 && src < 51 && dst > 0 && dst < 51 && ammt > 0 && ammt < 51)
+                        MoveItem(src, dst, ammt);
                     break;
-                #endregion
-                #region item being used
+                }
                 case 15:
+                {
+                    byte pos = p.Unpack8();
+                    if (pos > 0 && pos < 51 && this[pos].ItemID > 0)
                     {
-                        byte pos = p.Unpack8();
-
-                        if (this[pos].ItemID > 0)
-                            switch (this[pos].Type)
-                            {
-                                case eItemType.Tent: owner.Tent.Open(); break;
-                            }
-                    }
-                    break;
-                #endregion
-                #region destroy an item
-                case 3:// drop item to floor 124:
-                    {
-                        byte pos = p.Unpack8();
-                        byte qnt = p.Unpack8();
-                        byte ukn = p.Unpack8(); //??
-
-                        if (this[pos].ItemID > 0)
+                        switch (this[pos].Type)
                         {
-                            // test confirm destroy item
-                            owner.Send(Tools.FromFormat("bbWb", 23, 26, this[pos].ItemID, qnt));
-                            RemoveItem(pos, qnt);
+                            case eItemType.Tent:
+                                owner.Tent.Open();
+                                break;
                         }
                     }
                     break;
-                    #endregion
+                }
+                case 3:
+                {
+                    byte pos = p.Unpack8();
+                    byte qnt = p.Unpack8();
+                    byte ukn = p.Unpack8();
+                    if (pos > 0 && pos < 51 && this[pos].ItemID > 0)
+                    {
+                        owner.Send(Tools.FromFormat("bbWb", 23, 26, this[pos].ItemID, qnt));
+                        RemoveItem(pos, qnt);
+                    }
+                    break;
+                }
             }
         }
 
@@ -502,14 +609,16 @@ namespace Game.Code
                 var cur = this[cell];
                 if (cur == null) return false;
                 if (cur.ItemID == 0) return true;
-                if (cur.ItemID == item.ItemID && cur.SpaceLeft > 0) return true;
+                if (cur.ItemID == item.ItemID && item.Stackable && cur.SpaceLeft > 0) return true;
                 return false;
             }
         }
+
         public int FilledCount
         {
             get { lock (mylock) { return m_Items.Count(c => c != null && c.ItemID > 0); } }
         }
+
         public int unFilledCount
         {
             get { lock (mylock) { return 50 - FilledCount; } }
@@ -525,14 +634,16 @@ namespace Game.Code
                 if (FilledCount > 0)
                 {
                     for (byte a = 1; a < 51; a++)
+                    {
                         if (this[a].ItemID != 0)
                         {
                             tmp.Pack8(a);
                             tmp.Pack16(this[a].ItemID);
                             tmp.Pack8(this[a].Ammt);
                             tmp.Pack8(this[a].Damage);
-                            tmp.PackArray(new byte[] { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 });
+                            tmp.PackArray(new byte[24]);
                         }
+                    }
                 }
                 return tmp.Buffer;
             }
@@ -548,14 +659,16 @@ namespace Game.Code
                 if (FilledCount > 0)
                 {
                     for (byte a = 1; a < 51; a++)
+                    {
                         if (this[a].ItemID != 0)
                         {
                             tmp.Pack8(a);
                             tmp.Pack16(this[a].ItemID);
                             tmp.Pack8(this[a].Ammt);
                             tmp.Pack8(this[a].Damage);
-                            tmp.PackArray(new byte[] { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 });
+                            tmp.PackArray(new byte[24]);
                         }
+                    }
                 }
                 return tmp.Buffer;
             }
@@ -568,7 +681,6 @@ namespace Game.Code
                 lock (mylock)
                 {
                     Dictionary<byte, uint[]> tmp = new Dictionary<byte, uint[]>();
-
                     for (byte a = 1; a < 51; a++)
                         tmp.Add(a, new uint[] { this[a].ItemID, this[a].Damage, this[a].Ammt, a, 0, 0, 0, 0 });
                     return tmp;
@@ -576,48 +688,18 @@ namespace Game.Code
             }
         }
 
-
-
         public void onItemUsed(byte slot, byte tgrt, byte ammt)
         {
-            //Get item first
-            //if (m_Items[slot].ItemID > 0)
-            //{
-            //    switch (m_Items[slot].Type)
-            //    {
-            //        case eItemType.tent: host.Tent.Open(); break;
-            //        default:
-            //            {
-            //                host.DataOut = SendType.Multi;
-            //                //switch (tgrt)
-            //                //{
-            //                //    case 0: for (int a = 0; a < 2; a++) host.AddStat((byte)Items[slot].Data.StatusType[a], (byte)Items[slot].Data.StatusUp[a]); break;
-            //                //    //default:for (int a = 0; a < 2; a++) 
-            //                //}
-            //                m_Items[slot].Ammt -= 1;
-            //                SendPacket p = new SendPacket();
-            //                p.PackArray(new byte[] { 23, 9 });
-            //                p.Pack((byte)slot);
-            //                p.Pack((byte)ammt);
-            //                host.Send(p);
-            //                p = new SendPacket();
-            //                p.PackArray(new byte[] { 23, 15 });
-            //                host.Send(p);
-            //                host.DataOut = SendType.Normal;
-            //            } break;
-            //    }
-            //}
+            // Legacy hook retained for compatibility. Active item use is handled in AC23.
         }
+
         public void onItemCanceled(byte slot)
         {
-            //Get item first
-            if (m_Items[slot].ItemID > 0)
-                switch (m_Items[slot].Type)
-                {
-                    //case eItemType.Tent: owner.Tent.Close(); break;
-                }
+            // Legacy hook retained for compatibility.
         }
-        int MatrixtoNumber(int a, int b) { return ((a * 5) + (b - 5)); }//wlo specific
+
+        int MatrixtoNumber(int a, int b) { return ((a * 5) + (b - 5)); }
+
         byte[] NumbertoMatrix(int a)
         {
             var s = 0;
@@ -625,6 +707,7 @@ namespace Game.Code
                 s = (a / 5);
             else
                 s = 1 + (a / 5);
+
             var t = 0;
             if (a == 5 || a == 10 || a == 15 || a == 20 || a == 25 || a == 30 || a == 35 || a == 40 || a == 45 || a == 50)
                 t = 5;
@@ -632,20 +715,19 @@ namespace Game.Code
                 t = 5 - (((1 + (a / 5)) * 5) - a);
             else
                 t = a;
+
             byte[] matrixloc = new byte[2];
-            matrixloc[0] = (byte)(s);
-            matrixloc[1] = (byte)(t);
+            matrixloc[0] = (byte)s;
+            matrixloc[1] = (byte)t;
             return matrixloc;
-        }//wlo specific
+        }
     }
 
     public class TentInventoryManager : Inventory
     {
-
         public TentInventoryManager(Player src, global::DataFiles.PhxItemDat ItemDat)
             : base(src, ItemDat)
         {
-
         }
     }
 }
