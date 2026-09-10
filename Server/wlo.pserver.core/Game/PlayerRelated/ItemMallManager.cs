@@ -469,8 +469,7 @@ namespace Game.PlayerRelated
             if (player == null || player.UserAccount == null || player.Inv == null || entry == null) return false;
             if (packageQuantity == 0) packageQuantity = 1;
 
-            int unitsRequested = Math.Max(1, entry.Count) * packageQuantity;
-            if (unitsRequested > byte.MaxValue)
+            int unitsRequested = Math.Max(1, (int)entry.Count) * packageQuantity;            if (unitsRequested > byte.MaxValue)
             {
                 SendSystemMsg(player, "That purchase contains too many items for one transaction.");
                 DebugSystem.Write($"[ItemMall] Rejected oversized purchase #{entry.ItemID}: {unitsRequested} units.");
