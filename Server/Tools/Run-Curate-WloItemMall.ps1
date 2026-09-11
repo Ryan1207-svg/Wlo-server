@@ -7,12 +7,16 @@ $ErrorActionPreference = 'Stop'
 
 $serverRoot = Join-Path $RepoRoot 'Server'
 $curateScript = Join-Path $PSScriptRoot 'Curate-WloItemMall.ps1'
+$petFruitScript = Join-Path $PSScriptRoot 'Curate-WloPetFruit.ps1'
 $architecture = if ([Environment]::Is64BitProcess) { 'x64' } else { 'x86' }
 $nativeDir = Join-Path $serverRoot $architecture
 $interopDll = Join-Path $nativeDir 'SQLite.Interop.dll'
 
 if (-not (Test-Path -LiteralPath $curateScript)) {
     throw "Missing curation script: $curateScript"
+}
+if (-not (Test-Path -LiteralPath $petFruitScript)) {
+    throw "Missing pet fruit correction script: $petFruitScript"
 }
 if (-not (Test-Path -LiteralPath $interopDll)) {
     throw "Missing native SQLite provider for $architecture PowerShell: $interopDll"
@@ -47,6 +51,7 @@ try {
 
     Write-Host "SQLite native provider loaded: $interopDll" -ForegroundColor DarkGray
     & $curateScript -RepoRoot $RepoRoot -ItemDatPath $ItemDatPath
+    & $petFruitScript -RepoRoot $RepoRoot -ItemDatPath $ItemDatPath
 }
 finally {
     [void][WloNativeDllLoader]::SetDllDirectory($null)
