@@ -12,8 +12,6 @@ function Replace-Required {
         [string]$Label
     )
 
-    # Git checkouts on Windows can use CRLF while GitHub stores LF. Normalize both
-    # the file and patch anchors before matching so the patch works in either case.
     $normalizedText = $Text.Replace("`r`n", "`n")
     $normalizedOld  = $Old.Replace("`r`n", "`n")
     $normalizedNew  = $New.Replace("`r`n", "`n")
@@ -35,9 +33,8 @@ $equip = [IO.File]::ReadAllText($equipPath)
 $ac23  = [IO.File]::ReadAllText($ac23Path)
 
 # -----------------------------------------------------------------------------
-# EquipManager: add timed EXP multipliers used by Holy EXP Potions.
-# CurExp is the central EXP-gain path, so applying the multiplier here makes it
-# work for normal PvE rewards without duplicating logic in each battle system.
+# EquipManager: timed EXP multipliers used by Holy EXP Potions.
+# CurExp is the central EXP-gain path, so normal battle rewards inherit the boost.
 # -----------------------------------------------------------------------------
 if (-not $equip.Contains('SetExpMultiplier(double multiplier, TimeSpan duration)')) {
     $oldFields = @'
@@ -169,15 +166,14 @@ if (-not $equip.Contains('SetExpMultiplier(double multiplier, TimeSpan duration)
 }
 
 # -----------------------------------------------------------------------------
-# AC23: Rhode Island client sends AC23:128 when an inventory item is double-clicked.
-# Add explicit handlers for the starter consumables that Item.dat alone does not
-# currently describe sufficiently for the emulator.
+# AC23 item use support.
 # -----------------------------------------------------------------------------
 if (-not $ac23.Contains('using Game.Maps;')) {
     $ac23 = Replace-Required $ac23 "using Game.Code;`nusing Game.PlayerRelated;" "using Game.Code;`nusing Game.Maps;`nusing Game.PlayerRelated;" 'AC23 Game.Maps import'
 }
 
-if (-not $ac23.Contains('itemId == 32176')) {
+# Fugu Hot Pot (#32176): +300 HP / +300 SP.
+if (-not $ac23.Contains('Fugu Hot Pot (starter item #32176)')) {
     $oldRecovery = @'
             hpGain = 0;
             spGain = 0;
@@ -203,13 +199,15 @@ if (-not $ac23.Contains('itemId == 32176')) {
     $ac23 = Replace-Required $ac23 $oldRecovery $newRecovery 'Fugu Hot Pot recovery'
 }
 
-if (-not $ac23.Contains('10X Holy EXP Potion (#34190)')) {
+# Add special consumables to the standard double-click/use path.
+if (-not $ac23.Contains('WLO SPECIAL CONSUMABLES - STANDARD USE PATH')) {
     $oldPotential = @'
                 // Potential Pill
                 if (itemId == 34269)
 '@
 
     $newPotential = @'
+                // WLO SPECIAL CONSUMABLES - STANDARD USE PATH
                 // 10X Holy EXP Potion (#34190): 10x EXP for two hours.
                 if (itemId == 34190)
                 {
@@ -227,8 +225,8 @@ if (-not $ac23.Contains('10X Holy EXP Potion (#34190)')) {
                     return;
                 }
 
-                // Training Ticket (#34258): enter Training Island.
-                if (itemId == 34258)
+                // Training Ticket. Both IDs have appeared in Rhode Island client data/logs.
+                if (itemId == 34253 || itemId == 34258)
                 {
                     if (p.Level < 1 || p.Level > 199)
                     {
@@ -252,7 +250,7 @@ if (-not $ac23.Contains('10X Holy EXP Potion (#34190)')) {
                     p.Inv.RemoveItem(slot, 1);
                     p.SaveCharacterData();
                     SendItemMessage(p, "Training Ticket used. Welcome to Training Island!");
-                    DebugSystem.Write($"[AC23.UseItem] {p.CharName} used Training Ticket (#34258) and warped to map 13050.");
+                    DebugSystem.Write($"[AC23.UseItem] {p.CharName} used Training Ticket (#{itemId}) and warped to map 13050.");
                     return;
                 }
 
@@ -260,7 +258,75 @@ if (-not $ac23.Contains('10X Holy EXP Potion (#34190)')) {
                 if (itemId == 34269)
 '@
 
-    $ac23 = Replace-Required $ac23 $oldPotential $newPotential 'Holy EXP Potion and Training Ticket handlers'
+    $ac23 = Replace-Required $ac23 $oldPotential $newPotential 'special standard-use consumables'
+}
+
+# Rhode Island also sends special consumables through AC23:15. Handle those
+# before the HP/SP-only fallback so valid special items do not report unsupported.
+if (-not $ac23.Contains('WLO SPECIAL CONSUMABLES - AC23:15 PATH')) {
+    $oldRecv15 = @'
+                var itemInfo = cGlobal.ItemDatManager?.GetItemByID(item.ItemID);
+                if (!TryGetRecovery(item.ItemID, itemInfo, out int hpGain, out int spGain))
+'@
+
+    $newRecv15 = @'
+                var itemInfo = cGlobal.ItemDatManager?.GetItemByID(item.ItemID);
+
+                // WLO SPECIAL CONSUMABLES - AC23:15 PATH
+                if (item.ItemID == 34190)
+                {
+                    if (p.Eqs == null)
+                    {
+                        SendItemMessage(p, "Unable to activate the EXP potion right now; the item was not consumed.");
+                        return;
+                    }
+
+                    p.Eqs.SetExpMultiplier(10.0, TimeSpan.FromHours(2));
+                    p.Inv.RemoveItem(pos, 1);
+                    p.SaveCharacterData();
+                    SendItemMessage(p, "10X Holy EXP Potion activated: EXP x10 for 2 hours.");
+                    DebugSystem.Write($"[AC23.Recv15] {p.CharName} activated 10X Holy EXP Potion (#34190) for 2 hours.");
+                    return;
+                }
+
+                if (item.ItemID == 34253 || item.ItemID == 34258)
+                {
+                    if (p.Level < 1 || p.Level > 199)
+                    {
+                        SendItemMessage(p, "Training Tickets can only be used from level 1 to 199.");
+                        return;
+                    }
+                    if (p.CurMap == null)
+                    {
+                        SendItemMessage(p, "Training Island is unavailable right now; the ticket was not consumed.");
+                        return;
+                    }
+
+                    WarpData warp = new WarpData
+                    {
+                        DstMap = 13050,
+                        DstX_Axis = 100,
+                        DstY_Axis = 100
+                    };
+
+                    p.CurMap.Teleport(TeleportType.CmD, p, 0, warp);
+                    p.Inv.RemoveItem(pos, 1);
+                    p.SaveCharacterData();
+                    SendItemMessage(p, "Training Ticket used. Welcome to Training Island!");
+                    DebugSystem.Write($"[AC23.Recv15] {p.CharName} used Training Ticket (#{item.ItemID}) and warped to map 13050.");
+                    return;
+                }
+
+                if (item.ItemID == 34269)
+                {
+                    UsePotentialPill(p, pos, GetItemName(item, item.ItemID));
+                    return;
+                }
+
+                if (!TryGetRecovery(item.ItemID, itemInfo, out int hpGain, out int spGain))
+'@
+
+    $ac23 = Replace-Required $ac23 $oldRecv15 $newRecv15 'AC23:15 special consumables'
 }
 
 [IO.File]::WriteAllText($equipPath, $equip, (New-Object Text.UTF8Encoding($false)))
@@ -271,6 +337,6 @@ Write-Host 'WLO consumable patch applied.' -ForegroundColor Green
 Write-Host 'Fixed:'
 Write-Host '  - #32176 Fugu Hot Pot: +300 HP / +300 SP'
 Write-Host '  - #34190 10X Holy EXP Potion: x10 EXP for 2 hours'
-Write-Host '  - #34258 Training Ticket: warps to Training Island (map 13050)'
+Write-Host '  - #34253 / #34258 Training Ticket: Training Island warp'
+Write-Host '  - #34269 Potential Pill through standard and AC23:15 item-use paths'
 Write-Host ''
-Write-Host 'Now rebuild Wonderland Private Server.sln.' -ForegroundColor Cyan
