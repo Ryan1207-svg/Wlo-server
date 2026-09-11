@@ -806,7 +806,7 @@ namespace Game
 
                                 if (targetItem != null)
                                 {
-                                    if (Game.PlayerRelated.ItemMallManager.PurchaseItem(c, targetItem.ItemID, targetItem.Count))
+                                    if (Game.PlayerRelated.ItemMallManager.PurchaseAdvertisedItem(c, targetItem.ItemID, targetItem.Count))
                                     {
                                         c.SendSystemMessage($"🎉 Purchased {targetItem.ItemName} (x{targetItem.Count}) for {targetItem.PointCost} IM Points! Remaining: {Game.PlayerRelated.ItemMallManager.GetUserPoints(c)} Pts.");
                                     }

@@ -159,6 +159,8 @@ namespace Game.Code
         byte head;
         int m_currexp, m_curhp, m_cursp, gold, m_skillpoint, m_potential;
         long m_totalexp = 0;
+        double m_expMultiplier = 1.0;
+        DateTime m_expMultiplierUntilUtc = DateTime.MinValue;
         BodyStyle body;
         Affinity element;
         RebornJob job;
@@ -242,6 +244,46 @@ namespace Game.Code
                 {
                     m_totalexp = value;
                 }
+            }
+        }
+
+        public double ExpMultiplier
+        {
+            get
+            {
+                lock (m_Lock)
+                {
+                    if (DateTime.UtcNow >= m_expMultiplierUntilUtc)
+                    {
+                        m_expMultiplier = 1.0;
+                        m_expMultiplierUntilUtc = DateTime.MinValue;
+                    }
+                    return m_expMultiplier;
+                }
+            }
+        }
+
+        public TimeSpan ExpMultiplierRemaining
+        {
+            get
+            {
+                lock (m_Lock)
+                {
+                    TimeSpan remaining = m_expMultiplierUntilUtc - DateTime.UtcNow;
+                    return remaining > TimeSpan.Zero ? remaining : TimeSpan.Zero;
+                }
+            }
+        }
+
+        public void SetExpMultiplier(double multiplier, TimeSpan duration)
+        {
+            lock (m_Lock)
+            {
+                if (multiplier < 1.0) multiplier = 1.0;
+                if (duration < TimeSpan.Zero) duration = TimeSpan.Zero;
+
+                m_expMultiplier = multiplier;
+                m_expMultiplierUntilUtc = DateTime.UtcNow.Add(duration);
             }
         }
         /// <summary>
@@ -407,6 +449,19 @@ namespace Game.Code
                 lock (m_Lock)
                 {
                     long expgain = value;
+
+                    if (expgain > 0)
+                    {
+                        if (DateTime.UtcNow >= m_expMultiplierUntilUtc)
+                        {
+                            m_expMultiplier = 1.0;
+                            m_expMultiplierUntilUtc = DateTime.MinValue;
+                        }
+                        else if (m_expMultiplier > 1.0)
+                        {
+                            expgain = (long)Math.Min(long.MaxValue, Math.Round(expgain * m_expMultiplier));
+                        }
+                    }
 
                     while (expgain > 0)
                     {

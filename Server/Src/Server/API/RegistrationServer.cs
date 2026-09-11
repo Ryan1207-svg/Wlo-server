@@ -461,6 +461,13 @@ namespace Server.API
                 });
             }
 
+            // Synchronize the online account with the authoritative users.IM balance before purchase.
+            if (target.UserAccount != null)
+            {
+                int dbPoints = _userDb.GetIMPoints(session.UserId);
+                target.UserAccount.IM = Math.Max(0, dbPoints);
+            }
+
             bool ok = Game.PlayerRelated.ItemMallManager.PurchaseAdvertisedItem(target, itemId, advertisedCount, false);
             int points = Game.PlayerRelated.ItemMallManager.GetUserPoints(target);
 
