@@ -54,29 +54,55 @@ function Read-Catalog([string]$Path) {
     return $rows
 }
 
+function Decode-WloWord([UInt16]$Value) {
+    # Matches the original WLO client Item.dat decoder:
+    # (ushort)((value ^ 0xEFC3) - 9)
+    return [int]((([int]$Value -bxor 0xEFC3) - 9) -band 0xFFFF)
+}
+
 function Read-ItemDat([string]$Path) {
-    # PhxItemInfo is 47 bytes (Pack=1): NameLength[1], Name[20], Type[1],
-    # ItemID[2], Icon[2], LargeIcon[2], EquipPos[2], Level[2], Rank[1],
-    # Height[1], Width[1], StatusType[4], StatusUp[8].
+    # IMPORTANT: the Rhode Island CLIENT Item.dat is NOT the compact 47-byte
+    # PhxItemInfo format used by PhoenixData. It uses the original encoded
+    # 457-byte WLO item record. The old server ItemManager decoder confirms:
+    #   byte 0       = item-name length
+    #   bytes 1..20  = name stored in reverse order
+    #   byte 21      = encoded item type
+    #   bytes 22..23 = encoded ItemID (wordXor)
+    # The previous 47-byte parser walked the file at the wrong stride, which is
+    # why real items such as Snow Ears/Xmas Fork/Dragon Spar were never found.
     $bytes = [IO.File]::ReadAllBytes($Path)
-    $recordSize = 47
+    $recordSize = 457
     $items = New-Object System.Collections.Generic.List[object]
 
-    for ($offset = 0; ($offset + $recordSize) -le $bytes.Length; $offset += $recordSize) {
-        $nameLen = [Math]::Min([int]$bytes[$offset], 20)
-        if ($nameLen -le 0) { $nameLen = 20 }
-        $name = [Text.Encoding]::ASCII.GetString($bytes, $offset + 1, $nameLen).Trim([char]0).Trim()
+    $recordCount = [Math]::Floor($bytes.Length / $recordSize)
+    for ($record = 0; $record -lt $recordCount; $record++) {
+        $offset = $record * $recordSize
+        $nameLen = [int]$bytes[$offset]
+        if ($nameLen -le 0 -or $nameLen -gt 20) { continue }
+
+        $chars = New-Object char[] $nameLen
+        $validName = $true
+        for ($n = 0; $n -lt $nameLen; $n++) {
+            $value = [int]$bytes[$offset + (20 - $n)]
+            if ($value -eq 0) { $validName = $false; break }
+            $chars[$n] = [char]$value
+        }
+        if (-not $validName) { continue }
+
+        $name = (-join $chars).Trim()
         if ([string]::IsNullOrWhiteSpace($name)) { continue }
 
-        $id = [BitConverter]::ToUInt16($bytes, $offset + 22)
-        if ($id -eq 0) { continue }
+        $rawId = [BitConverter]::ToUInt16($bytes, $offset + 22)
+        $id = Decode-WloWord $rawId
+        if ($id -le 0) { continue }
 
         $items.Add([pscustomobject]@{
-            ItemID = [int]$id
+            ItemID = $id
             Name = $name
             Normalized = Normalize-Name $name
         })
     }
+
     return $items
 }
 
@@ -141,7 +167,7 @@ $addSpecs = New-Object System.Collections.Generic.List[object]
 $addSpecs.Add((New-AddSpec 'Super Potential Pill' @('Super Potential Pill','Super Potential') 'Grocery' 3 'Requested'))
 $addSpecs.Add((New-AddSpec 'Shadow Pestle' @('Shadow Pestle') 'Weaponry' 1 'Requested'))
 $addSpecs.Add((New-AddSpec 'Dragon Spar' @('Dragon Spar') 'Grocery' 3 'Requested'))
-$addSpecs.Add((New-AddSpec '15X Holy EXP Potion' @('15X Holy EXP Potion','15X EXP Potion','15x Holy EXP Potion') 'Grocery' 3 'Requested'))
+$addSpecs.Add((New-AddSpec '15X Holy EXP Potion' @('15X Holy EXP Potion','15X EXP Potion','15x Holy EXP Potion','15 Holy EXP Potion') 'Grocery' 3 'Requested'))
 $addSpecs.Add((New-AddSpec 'Snow Girl Pack' @('Snow Girl Pack','Snow Girl Lucky Bag','Snow Girl Bag') 'Grocery' 3 'Requested'))
 $addSpecs.Add((New-AddSpec 'Xmas Fork' @('Xmas Fork','X-mas Fork','Christmas Fork') 'Weaponry' 1 'Requested'))
 $addSpecs.Add((New-AddSpec 'Forest Fork' @('Forest Fork') 'Weaponry' 1 'Requested'))
@@ -150,8 +176,9 @@ $addSpecs.Add((New-AddSpec 'Attack Pestle' @('Attack Pestle','Attack Pestal','At
 $addSpecs.Add((New-AddSpec '2X EXP Gold Card' @('2X EXP Gold Card','Gold Card') 'Grocery' 3 'Requested'))
 $addSpecs.Add((New-AddSpec 'Snow Ears' @('Snow Ears') 'Armory' 2 'Requested'))
 
-# Individual raw fruit listings. These are deliberately single-item listings so
-# they can be bought one-by-one for pets/food use rather than as a pack.
+# These ordinary fruits are retained here only so an earlier bad curation run can
+# remove/replace them cleanly. Run-Curate-WloItemMall.ps1 follows this script with
+# Fix-WloPetFruits.ps1, which installs the actual partner/pet enhancement foods.
 $fruitSpecs = @(
     @{ Name='Aligote'; Aliases=@('Aligote') },
     @{ Name='Apple'; Aliases=@('Apple') },
@@ -187,7 +214,7 @@ Write-Host "Reading catalog: $catalogPath"
 $rows = Read-Catalog $catalogPath
 Write-Host "Reading item IDs from: $ItemDatPath"
 $itemDat = Read-ItemDat $ItemDatPath
-Write-Host "Loaded $($itemDat.Count) named Item.dat records."
+Write-Host "Loaded $($itemDat.Count) decoded Rhode Island Item.dat records."
 
 $removeSet = @{}
 foreach ($name in $removeNames) { $removeSet[(Normalize-Name $name)] = $true }
