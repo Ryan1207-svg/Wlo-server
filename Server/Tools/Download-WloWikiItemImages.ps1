@@ -18,7 +18,7 @@ if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
 
 New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
 $wikiApi = 'https://wonderlandonline.fandom.com/api.php'
-$userAgent = 'WLOPrivateServer/1.1 (personal-use item image cache)'
+$userAgent = 'WLOPrivateServer/1.2 (personal-use item image cache)'
 
 function Invoke-WikiApi([hashtable]$Parameters) {
     $Parameters['format'] = 'json'
@@ -113,23 +113,64 @@ function Get-LocalCatalog {
     if (-not (Test-Path -LiteralPath $jsonPath)) { return @() }
 
     try {
-        $raw = @(Get-Content -LiteralPath $jsonPath -Raw -Encoding UTF8 | ConvertFrom-Json)
-        $result = foreach ($row in $raw) {
-            $id = $null
-            $name = $null
-            if ($null -ne $row.id) { $id = $row.id }
-            elseif ($null -ne $row.ItemID) { $id = $row.ItemID }
-            elseif ($null -ne $row.item_id) { $id = $row.item_id }
+        # Windows PowerShell 5.1 can return a top-level JSON array as one nested
+        # System.Object[] when ConvertFrom-Json is wrapped by @(...). That made
+        # $row.item_id become an Object[] containing every ID in the catalog.
+        # Read once and explicitly flatten all JSON array levels instead.
+        $jsonText = [System.IO.File]::ReadAllText($jsonPath, [System.Text.Encoding]::UTF8)
+        $parsed = ConvertFrom-Json -InputObject $jsonText
 
-            if ($null -ne $row.name) { $name = $row.name }
-            elseif ($null -ne $row.ItemName) { $name = $row.ItemName }
-            elseif ($null -ne $row.item_name) { $name = $row.item_name }
+        $pending = New-Object System.Collections.Queue
+        $pending.Enqueue($parsed)
+        $rows = New-Object System.Collections.Generic.List[object]
 
-            if ($id -and $name) {
-                [pscustomobject]@{ id = [int]$id; name = [string]$name }
+        while ($pending.Count -gt 0) {
+            $current = $pending.Dequeue()
+            if ($null -eq $current) { continue }
+
+            if ($current -is [System.Array]) {
+                foreach ($entry in $current) {
+                    $pending.Enqueue($entry)
+                }
+                continue
+            }
+
+            # Also tolerate a future wrapper such as { "items": [ ... ] }.
+            $itemsProperty = $current.PSObject.Properties['items']
+            if ($itemsProperty -and $null -ne $itemsProperty.Value) {
+                $pending.Enqueue($itemsProperty.Value)
+                continue
+            }
+
+            $rows.Add($current)
+        }
+
+        $result = New-Object System.Collections.Generic.List[object]
+        foreach ($row in $rows) {
+            $idValue = $null
+            $nameValue = $null
+
+            if ($row.PSObject.Properties['id']) { $idValue = $row.id }
+            elseif ($row.PSObject.Properties['ItemID']) { $idValue = $row.ItemID }
+            elseif ($row.PSObject.Properties['item_id']) { $idValue = $row.item_id }
+
+            if ($row.PSObject.Properties['name']) { $nameValue = $row.name }
+            elseif ($row.PSObject.Properties['ItemName']) { $nameValue = $row.ItemName }
+            elseif ($row.PSObject.Properties['item_name']) { $nameValue = $row.item_name }
+
+            $id = 0
+            if ($null -ne $idValue) {
+                [void][int]::TryParse([string]$idValue, [ref]$id)
+            }
+
+            $name = if ($null -ne $nameValue) { [string]$nameValue } else { '' }
+            if ($id -gt 0 -and -not [string]::IsNullOrWhiteSpace($name)) {
+                $result.Add([pscustomobject]@{ id = $id; name = $name.Trim() })
             }
         }
-        return @($result)
+
+        Write-Host "Loaded $($result.Count) Item Mall rows from Server\Data\item_mall.json."
+        return @($result.ToArray())
     }
     catch {
         Write-Warning "Could not read local Data\item_mall.json: $($_.Exception.Message)"
@@ -185,9 +226,25 @@ catch {
     $catalog = @(Get-LocalCatalog)
 }
 
-$catalog = @($catalog | Where-Object { $_.id -and $_.name } | Sort-Object id -Unique)
+# Flatten the live response too, because Windows PowerShell 5.1 can preserve
+# the JSON array as one nested object when Invoke-RestMethod is wrapped by @().
+$flatCatalog = New-Object System.Collections.Generic.List[object]
+$catalogQueue = New-Object System.Collections.Queue
+$catalogQueue.Enqueue($catalog)
+while ($catalogQueue.Count -gt 0) {
+    $entry = $catalogQueue.Dequeue()
+    if ($null -eq $entry) { continue }
+    if ($entry -is [System.Array]) {
+        foreach ($child in $entry) { $catalogQueue.Enqueue($child) }
+    }
+    else {
+        $flatCatalog.Add($entry)
+    }
+}
+
+$catalog = @($flatCatalog.ToArray() | Where-Object { $_.id -and $_.name } | Sort-Object id -Unique)
 if ($catalog.Count -eq 0) {
-    Write-Error "No Item Mall catalog could be loaded. Start the WLO server, then run this script again."
+    Write-Error "No Item Mall catalog could be loaded from either the running portal or Server\Data\item_mall.json."
     exit 1
 }
 
