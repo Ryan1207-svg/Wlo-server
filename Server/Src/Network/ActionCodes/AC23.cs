@@ -233,6 +233,53 @@ namespace Network.ActionCodes
                     return;
                 }
 
+                // WLO SPECIAL CONSUMABLES - STANDARD USE PATH
+                // 10X Holy EXP Potion (#34190): 10x EXP for two hours.
+                if (itemId == 34190)
+                {
+                    if (p.Eqs == null)
+                    {
+                        SendItemMessage(p, "Unable to activate the EXP potion right now; the item was not consumed.");
+                        return;
+                    }
+
+                    p.Eqs.SetExpMultiplier(10.0, TimeSpan.FromHours(2));
+                    p.Inv.RemoveItem(slot, 1);
+                    p.SaveCharacterData();
+                    SendItemMessage(p, "10X Holy EXP Potion activated: EXP x10 for 2 hours.");
+                    DebugSystem.Write($"[AC23.UseItem] {p.CharName} activated 10X Holy EXP Potion (#34190) for 2 hours.");
+                    return;
+                }
+
+                // Training Ticket. Both IDs have appeared in Rhode Island client data/logs.
+                if (itemId == 34253 || itemId == 34258)
+                {
+                    if (p.Level < 1 || p.Level > 199)
+                    {
+                        SendItemMessage(p, "Training Tickets can only be used from level 1 to 199.");
+                        return;
+                    }
+                    if (p.CurMap == null)
+                    {
+                        SendItemMessage(p, "Training Island is unavailable right now; the ticket was not consumed.");
+                        return;
+                    }
+
+                    WarpData warp = new WarpData
+                    {
+                        DstMap = 13050,
+                        DstX_Axis = 100,
+                        DstY_Axis = 100
+                    };
+
+                    p.CurMap.Teleport(TeleportType.CmD, p, 0, warp);
+                    p.Inv.RemoveItem(slot, 1);
+                    p.SaveCharacterData();
+                    SendItemMessage(p, "Training Ticket used. Welcome to Training Island!");
+                    DebugSystem.Write($"[AC23.UseItem] {p.CharName} used Training Ticket (#{itemId}) and warped to map 13050.");
+                    return;
+                }
+
                 // Potential Pill
                 if (itemId == 34269)
                 {
@@ -547,6 +594,58 @@ namespace Network.ActionCodes
                 }
 
                 var itemInfo = cGlobal.ItemDatManager?.GetItemByID(item.ItemID);
+
+                // WLO SPECIAL CONSUMABLES - AC23:15 PATH
+                if (item.ItemID == 34190)
+                {
+                    if (p.Eqs == null)
+                    {
+                        SendItemMessage(p, "Unable to activate the EXP potion right now; the item was not consumed.");
+                        return;
+                    }
+
+                    p.Eqs.SetExpMultiplier(10.0, TimeSpan.FromHours(2));
+                    p.Inv.RemoveItem(pos, 1);
+                    p.SaveCharacterData();
+                    SendItemMessage(p, "10X Holy EXP Potion activated: EXP x10 for 2 hours.");
+                    DebugSystem.Write($"[AC23.Recv15] {p.CharName} activated 10X Holy EXP Potion (#34190) for 2 hours.");
+                    return;
+                }
+
+                if (item.ItemID == 34253 || item.ItemID == 34258)
+                {
+                    if (p.Level < 1 || p.Level > 199)
+                    {
+                        SendItemMessage(p, "Training Tickets can only be used from level 1 to 199.");
+                        return;
+                    }
+                    if (p.CurMap == null)
+                    {
+                        SendItemMessage(p, "Training Island is unavailable right now; the ticket was not consumed.");
+                        return;
+                    }
+
+                    WarpData warp = new WarpData
+                    {
+                        DstMap = 13050,
+                        DstX_Axis = 100,
+                        DstY_Axis = 100
+                    };
+
+                    p.CurMap.Teleport(TeleportType.CmD, p, 0, warp);
+                    p.Inv.RemoveItem(pos, 1);
+                    p.SaveCharacterData();
+                    SendItemMessage(p, "Training Ticket used. Welcome to Training Island!");
+                    DebugSystem.Write($"[AC23.Recv15] {p.CharName} used Training Ticket (#{item.ItemID}) and warped to map 13050.");
+                    return;
+                }
+
+                if (item.ItemID == 34269)
+                {
+                    UsePotentialPill(p, pos, GetItemName(item, item.ItemID));
+                    return;
+                }
+
                 if (!TryGetRecovery(item.ItemID, itemInfo, out int hpGain, out int spGain))
                 {
                     SendItemMessage(p, $"{GetItemName(item, item.ItemID)} cannot be used as an HP/SP refill item.");
