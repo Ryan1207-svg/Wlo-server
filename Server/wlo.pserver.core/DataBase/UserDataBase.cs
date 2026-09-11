@@ -78,6 +78,84 @@ namespace DataBase
             }
         }
 
+        private void RepairExistingAccountRows()
+        {
+            try
+            {
+                if (!ColumnExists(DataBaseID_Ref)) return;
+
+                var rows = GetDataTable("SELECT * FROM " + TableName);
+                if (rows == null) return;
+
+                int repaired = 0;
+                foreach (DataRow row in rows.Rows)
+                {
+                    uint userId;
+                    if (!uint.TryParse(row[DataBaseID_Ref].ToString(), out userId) || userId == 0)
+                        continue;
+
+                    uint char1Id = userId + 10000u;
+                    uint char2Id = char1Id + 4500000u;
+
+                    if (ColumnExists(CharacterID1_Ref))
+                    {
+                        uint current = 0;
+                        if (row[CharacterID1_Ref] != DBNull.Value)
+                            uint.TryParse(row[CharacterID1_Ref].ToString(), out current);
+                        if (current == 0)
+                        {
+                            ExecuteNonQuery(
+                                "UPDATE " + TableName + " SET " + CharacterID1_Ref + " = @value WHERE " + DataBaseID_Ref + " = @uid",
+                                new DbParam("@value", char1Id), new DbParam("@uid", userId));
+                            repaired++;
+                        }
+                    }
+
+                    if (ColumnExists(CharacterID2_Ref))
+                    {
+                        uint current = 0;
+                        if (row[CharacterID2_Ref] != DBNull.Value)
+                            uint.TryParse(row[CharacterID2_Ref].ToString(), out current);
+                        if (current == 0)
+                        {
+                            ExecuteNonQuery(
+                                "UPDATE " + TableName + " SET " + CharacterID2_Ref + " = @value WHERE " + DataBaseID_Ref + " = @uid",
+                                new DbParam("@value", char2Id), new DbParam("@uid", userId));
+                            repaired++;
+                        }
+                    }
+
+                    if (ColumnExists(IM_Ref) && row[IM_Ref] == DBNull.Value)
+                    {
+                        ExecuteNonQuery(
+                            "UPDATE " + TableName + " SET " + IM_Ref + " = 0 WHERE " + DataBaseID_Ref + " = @uid",
+                            new DbParam("@uid", userId));
+                    }
+
+                    if (ColumnExists("im_bonus") && row["im_bonus"] == DBNull.Value)
+                    {
+                        ExecuteNonQuery(
+                            "UPDATE " + TableName + " SET im_bonus = 0 WHERE " + DataBaseID_Ref + " = @uid",
+                            new DbParam("@uid", userId));
+                    }
+
+                    if (ColumnExists(Char_Delete_Code_Ref) && row[Char_Delete_Code_Ref] == DBNull.Value)
+                    {
+                        ExecuteNonQuery(
+                            "UPDATE " + TableName + " SET " + Char_Delete_Code_Ref + " = '' WHERE " + DataBaseID_Ref + " = @uid",
+                            new DbParam("@uid", userId));
+                    }
+                }
+
+                if (repaired > 0)
+                    DebugSystem.Write($"[UserDataBase] Repaired {repaired} legacy web-account character ID field(s).");
+            }
+            catch (Exception ex)
+            {
+                DebugSystem.Write($"[UserDataBase] Existing-account repair failed: {ex.Message}");
+            }
+        }
+
         /// <summary>
         /// Verifies the account table without deleting existing accounts. Older versions of this
         /// method dropped the whole users table when a column was missing; that is unsafe for a
@@ -159,6 +237,7 @@ namespace DataBase
                 }
             }
 
+            RepairExistingAccountRows();
             DebugSystem.Write("Found and verified users table");
         }
 
