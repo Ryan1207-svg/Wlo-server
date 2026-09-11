@@ -11,101 +11,137 @@ Add-Type -AssemblyName System.Drawing
 
 $serverRoot = Split-Path -Parent $PSScriptRoot
 $projectImageDirectory = Join-Path $serverRoot "Web\images\items"
+if ([string]::IsNullOrWhiteSpace($OutputDirectory)) { $OutputDirectory = $projectImageDirectory }
+New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
 
-if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
-    $OutputDirectory = $projectImageDirectory
+$userAgent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) WLOPrivateServer/2.0'
+$wikiApi = 'https://wonderlandonline.fandom.com/api.php'
+
+function Test-PngBytes([byte[]]$Bytes) {
+    return $Bytes -and $Bytes.Length -gt 8 -and
+        $Bytes[0] -eq 0x89 -and $Bytes[1] -eq 0x50 -and $Bytes[2] -eq 0x4E -and $Bytes[3] -eq 0x47
 }
 
-New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
-$wikiApi = 'https://wonderlandonline.fandom.com/api.php'
-$userAgent = 'WLOPrivateServer/1.2 (personal-use item image cache)'
+function Test-JpegBytes([byte[]]$Bytes) {
+    return $Bytes -and $Bytes.Length -gt 4 -and $Bytes[0] -eq 0xFF -and $Bytes[1] -eq 0xD8
+}
+
+function Test-GifBytes([byte[]]$Bytes) {
+    return $Bytes -and $Bytes.Length -gt 6 -and $Bytes[0] -eq 0x47 -and $Bytes[1] -eq 0x49 -and $Bytes[2] -eq 0x46
+}
+
+function Download-Bytes([string]$Url, [string]$Referer = '') {
+    $client = New-Object System.Net.WebClient
+    $client.Headers['User-Agent'] = $userAgent
+    $client.Headers['Accept'] = 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8'
+    if (-not [string]::IsNullOrWhiteSpace($Referer)) { $client.Headers['Referer'] = $Referer }
+    try { return $client.DownloadData($Url) }
+    finally { $client.Dispose() }
+}
+
+function Save-ImageAsPng([byte[]]$Bytes, [string]$Destination) {
+    if (Test-PngBytes $Bytes) {
+        [IO.File]::WriteAllBytes($Destination, $Bytes)
+        return
+    }
+
+    if (-not ((Test-JpegBytes $Bytes) -or (Test-GifBytes $Bytes))) {
+        throw 'Downloaded response was not a PNG/JPEG/GIF image (likely an HTML/CDN response).'
+    }
+
+    $stream = New-Object IO.MemoryStream(,$Bytes)
+    try {
+        $image = [Drawing.Image]::FromStream($stream)
+        try { $image.Save($Destination, [Drawing.Imaging.ImageFormat]::Png) }
+        finally { $image.Dispose() }
+    }
+    finally { $stream.Dispose() }
+}
+
+function Get-WloHubImage([int]$ItemId) {
+    $pageUrl = "https://wlohub.com/items/$ItemId"
+    try {
+        $page = Invoke-WebRequest -UseBasicParsing -Uri $pageUrl -Headers @{ 'User-Agent'=$userAgent } -TimeoutSec 20
+        $html = [System.Net.WebUtility]::HtmlDecode([string]$page.Content)
+
+        # WLOHUB item pages use /images/items/<image-number>.png. The image number
+        # is not always the same as the WLO item ID, so scrape it from the item page.
+        $matches = [regex]::Matches($html, '(?i)(?:src|href)=["'']([^"'']*/images/items/\d+\.png(?:\?[^"'']*)?)["'']')
+        if ($matches.Count -eq 0) { return $null }
+
+        foreach ($m in $matches) {
+            $url = $m.Groups[1].Value
+            if ($url.StartsWith('//')) { $url = 'https:' + $url }
+            elseif ($url.StartsWith('/')) { $url = 'https://wlohub.com' + $url }
+            elseif (-not $url.StartsWith('http')) { $url = 'https://wlohub.com/' + $url.TrimStart('/') }
+
+            try {
+                $bytes = Download-Bytes $url $pageUrl
+                if (Test-PngBytes $bytes) {
+                    return [pscustomobject]@{ Title="WLOHUB item #$ItemId"; Url=$url; Bytes=$bytes; Source='WLOHUB' }
+                }
+            }
+            catch { }
+        }
+    }
+    catch { }
+    return $null
+}
 
 function Invoke-WikiApi([hashtable]$Parameters) {
     $Parameters['format'] = 'json'
     $query = ($Parameters.GetEnumerator() | ForEach-Object {
         [uri]::EscapeDataString([string]$_.Key) + '=' + [uri]::EscapeDataString([string]$_.Value)
     }) -join '&'
-    Invoke-RestMethod -Uri ($wikiApi + '?' + $query) -Headers @{ 'User-Agent' = $userAgent } -Method Get -TimeoutSec 25
+    Invoke-RestMethod -Uri ($wikiApi + '?' + $query) -Headers @{ 'User-Agent'=$userAgent } -Method Get -TimeoutSec 25
 }
 
-function Get-PageImage([string]$Title) {
+function Get-WikiPageImage([string]$Title) {
     if ([string]::IsNullOrWhiteSpace($Title)) { return $null }
+    try {
+        $result = Invoke-WikiApi @{
+            action='query'; redirects='1'; prop='pageimages'; piprop='thumbnail|original'; pithumbsize='320'; titles=$Title
+        }
+        $pages = @($result.query.pages.PSObject.Properties.Value)
+        if ($pages.Count -eq 0) { return $null }
+        $page = $pages | Select-Object -First 1
+        if ($page.missing -ne $null) { return $null }
+        $url = $null
+        if ($page.original -and $page.original.source) { $url = [string]$page.original.source }
+        elseif ($page.thumbnail -and $page.thumbnail.source) { $url = [string]$page.thumbnail.source }
+        if (-not $url) { return $null }
 
-    $result = Invoke-WikiApi @{
-        action = 'query'
-        redirects = '1'
-        prop = 'pageimages'
-        piprop = 'thumbnail|original'
-        pithumbsize = '320'
-        titles = $Title
+        $bytes = Download-Bytes $url 'https://wonderlandonline.fandom.com/'
+        if ((Test-PngBytes $bytes) -or (Test-JpegBytes $bytes) -or (Test-GifBytes $bytes)) {
+            return [pscustomobject]@{ Title=[string]$page.title; Url=$url; Bytes=$bytes; Source='Fandom' }
+        }
     }
-
-    $pages = @($result.query.pages.PSObject.Properties.Value)
-    if ($pages.Count -eq 0) { return $null }
-    $page = $pages | Select-Object -First 1
-    if ($page.missing -ne $null) { return $null }
-
-    $url = $null
-    if ($page.thumbnail -and $page.thumbnail.source) { $url = [string]$page.thumbnail.source }
-    elseif ($page.original -and $page.original.source) { $url = [string]$page.original.source }
-    if ([string]::IsNullOrWhiteSpace($url)) { return $null }
-
-    [pscustomobject]@{ Title = [string]$page.title; Url = $url }
-}
-
-function Search-PageImage([string]$SearchText) {
-    if ([string]::IsNullOrWhiteSpace($SearchText)) { return $null }
-
-    $search = Invoke-WikiApi @{
-        action = 'query'
-        list = 'search'
-        srnamespace = '0'
-        srlimit = '5'
-        srsearch = $SearchText
-    }
-
-    foreach ($hit in @($search.query.search)) {
-        $image = Get-PageImage ([string]$hit.title)
-        if ($image) { return $image }
-    }
+    catch { }
     return $null
 }
 
-function Get-SearchCandidates([string]$Name) {
-    $list = New-Object System.Collections.Generic.List[string]
-    if (-not [string]::IsNullOrWhiteSpace($Name)) { $list.Add($Name.Trim()) }
+function Search-WikiImage([string]$Name) {
+    $candidates = New-Object Collections.Generic.List[string]
+    if ($Name) { $candidates.Add($Name.Trim()) }
+    $clean = ($Name -replace '\s+[xX]\s*\d+\s*$', '' -replace '\s*\([^)]*\)\s*$', '').Trim()
+    if ($clean -and -not $candidates.Contains($clean)) { $candidates.Add($clean) }
 
-    $clean = $Name -replace '\s+[xX]\s*\d+\s*$', ''
-    $clean = $clean -replace '\s*\([^)]*\)\s*$', ''
-    $clean = $clean -replace '\s+-\s+.*$', ''
-    $clean = $clean.Trim()
-    if ($clean -and -not $list.Contains($clean)) { $list.Add($clean) }
-
-    return $list
-}
-
-function Save-AsPng([string]$Url, [string]$Destination) {
-    $client = New-Object System.Net.WebClient
-    $client.Headers['User-Agent'] = $userAgent
-    try {
-        $bytes = $client.DownloadData($Url)
-        if (-not $bytes -or $bytes.Length -lt 32) {
-            throw "Downloaded image was empty or invalid."
-        }
-
-        $ms = New-Object System.IO.MemoryStream(,$bytes)
-        try {
-            $image = [System.Drawing.Image]::FromStream($ms)
-            try {
-                $tmp = $Destination + '.tmp.png'
-                $image.Save($tmp, [System.Drawing.Imaging.ImageFormat]::Png)
-                Move-Item -LiteralPath $tmp -Destination $Destination -Force
-            }
-            finally { $image.Dispose() }
-        }
-        finally { $ms.Dispose() }
+    foreach ($candidate in $candidates) {
+        $direct = Get-WikiPageImage $candidate
+        if ($direct) { return $direct }
     }
-    finally { $client.Dispose() }
+
+    foreach ($candidate in $candidates) {
+        try {
+            $search = Invoke-WikiApi @{ action='query'; list='search'; srnamespace='0'; srlimit='5'; srsearch=$candidate }
+            foreach ($hit in @($search.query.search)) {
+                $img = Get-WikiPageImage ([string]$hit.title)
+                if ($img) { return $img }
+            }
+        }
+        catch { }
+    }
+    return $null
 }
 
 function Get-LocalCatalog {
@@ -113,43 +149,30 @@ function Get-LocalCatalog {
     if (-not (Test-Path -LiteralPath $jsonPath)) { return @() }
 
     try {
-        # Windows PowerShell 5.1 can return a top-level JSON array as one nested
-        # System.Object[] when ConvertFrom-Json is wrapped by @(...). That made
-        # $row.item_id become an Object[] containing every ID in the catalog.
-        # Read once and explicitly flatten all JSON array levels instead.
-        $jsonText = [System.IO.File]::ReadAllText($jsonPath, [System.Text.Encoding]::UTF8)
+        $jsonText = [IO.File]::ReadAllText($jsonPath, [Text.Encoding]::UTF8)
         $parsed = ConvertFrom-Json -InputObject $jsonText
-
-        $pending = New-Object System.Collections.Queue
+        $pending = New-Object Collections.Queue
         $pending.Enqueue($parsed)
-        $rows = New-Object System.Collections.Generic.List[object]
+        $rows = New-Object Collections.Generic.List[object]
 
         while ($pending.Count -gt 0) {
             $current = $pending.Dequeue()
             if ($null -eq $current) { continue }
-
             if ($current -is [System.Array]) {
-                foreach ($entry in $current) {
-                    $pending.Enqueue($entry)
-                }
+                foreach ($entry in $current) { $pending.Enqueue($entry) }
                 continue
             }
-
-            # Also tolerate a future wrapper such as { "items": [ ... ] }.
             $itemsProperty = $current.PSObject.Properties['items']
             if ($itemsProperty -and $null -ne $itemsProperty.Value) {
                 $pending.Enqueue($itemsProperty.Value)
                 continue
             }
-
             $rows.Add($current)
         }
 
-        $result = New-Object System.Collections.Generic.List[object]
+        $result = New-Object Collections.Generic.List[object]
         foreach ($row in $rows) {
-            $idValue = $null
-            $nameValue = $null
-
+            $idValue = $null; $nameValue = $null
             if ($row.PSObject.Properties['id']) { $idValue = $row.id }
             elseif ($row.PSObject.Properties['ItemID']) { $idValue = $row.ItemID }
             elseif ($row.PSObject.Properties['item_id']) { $idValue = $row.item_id }
@@ -159,16 +182,12 @@ function Get-LocalCatalog {
             elseif ($row.PSObject.Properties['item_name']) { $nameValue = $row.item_name }
 
             $id = 0
-            if ($null -ne $idValue) {
-                [void][int]::TryParse([string]$idValue, [ref]$id)
-            }
-
+            if ($null -ne $idValue) { [void][int]::TryParse([string]$idValue, [ref]$id) }
             $name = if ($null -ne $nameValue) { [string]$nameValue } else { '' }
             if ($id -gt 0 -and -not [string]::IsNullOrWhiteSpace($name)) {
-                $result.Add([pscustomobject]@{ id = $id; name = $name.Trim() })
+                $result.Add([pscustomobject]@{ id=$id; name=$name.Trim() })
             }
         }
-
         Write-Host "Loaded $($result.Count) Item Mall rows from Server\Data\item_mall.json."
         return @($result.ToArray())
     }
@@ -179,70 +198,44 @@ function Get-LocalCatalog {
 }
 
 function Mirror-ToRuntime([string]$SourceDirectory) {
-    $targets = New-Object System.Collections.Generic.List[string]
-
-    # RegistrationServer checks AppDomain.CurrentDomain.BaseDirectory\Web\images\items first.
-    # Mirror the cache beside every built server EXE so an empty runtime Web folder can never
-    # hide the project-level cache.
+    $targets = New-Object Collections.Generic.List[string]
     $exeFiles = @(Get-ChildItem -LiteralPath (Join-Path $serverRoot 'bin') -Recurse -File -Filter 'Wonderland Private Server.exe' -ErrorAction SilentlyContinue)
     foreach ($exe in $exeFiles) {
         $target = Join-Path $exe.DirectoryName 'Web\images\items'
         if (-not $targets.Contains($target)) { $targets.Add($target) }
     }
-
-    # Include the normal classic .NET build folders even before the first EXE scan succeeds.
-    foreach ($buildFolder in @('Debug', 'Release')) {
+    foreach ($buildFolder in @('Debug','Release')) {
         $target = Join-Path $serverRoot ("bin\" + $buildFolder + "\Web\images\items")
         if (-not $targets.Contains($target)) { $targets.Add($target) }
     }
 
     foreach ($target in $targets) {
-        try {
-            New-Item -ItemType Directory -Force -Path $target | Out-Null
-            Get-ChildItem -LiteralPath $SourceDirectory -File -Filter '*.png' -ErrorAction SilentlyContinue |
-                Copy-Item -Destination $target -Force
-
-            $manifestSource = Join-Path $SourceDirectory 'wiki-image-manifest.csv'
-            if (Test-Path -LiteralPath $manifestSource) {
-                Copy-Item -LiteralPath $manifestSource -Destination (Join-Path $target 'wiki-image-manifest.csv') -Force
-            }
-
-            $count = @(Get-ChildItem -LiteralPath $target -File -Filter '*.png' -ErrorAction SilentlyContinue).Count
-            Write-Host "Runtime image cache: $target ($count PNG files)"
-        }
-        catch {
-            Write-Warning "Could not mirror images to '$target': $($_.Exception.Message)"
-        }
+        New-Item -ItemType Directory -Force -Path $target | Out-Null
+        Get-ChildItem -LiteralPath $SourceDirectory -File -Filter '*.png' -ErrorAction SilentlyContinue | Copy-Item -Destination $target -Force
+        $count = @(Get-ChildItem -LiteralPath $target -File -Filter '*.png' -ErrorAction SilentlyContinue).Count
+        Write-Host "Runtime image cache: $target ($count PNG files)"
     }
 }
 
 Write-Host "Reading Item Mall catalog from $CatalogUrl ..."
 $catalog = @()
-try {
-    $catalog = @(Invoke-RestMethod -Uri $CatalogUrl -Headers @{ 'User-Agent' = $userAgent } -TimeoutSec 10)
-}
+try { $catalog = @(Invoke-RestMethod -Uri $CatalogUrl -Headers @{ 'User-Agent'=$userAgent } -TimeoutSec 10) }
 catch {
     Write-Warning "Live catalog was unavailable; trying Server\Data\item_mall.json instead."
     $catalog = @(Get-LocalCatalog)
 }
 
-# Flatten the live response too, because Windows PowerShell 5.1 can preserve
-# the JSON array as one nested object when Invoke-RestMethod is wrapped by @().
-$flatCatalog = New-Object System.Collections.Generic.List[object]
-$catalogQueue = New-Object System.Collections.Queue
-$catalogQueue.Enqueue($catalog)
-while ($catalogQueue.Count -gt 0) {
-    $entry = $catalogQueue.Dequeue()
+$flat = New-Object Collections.Generic.List[object]
+$q = New-Object Collections.Queue
+$q.Enqueue($catalog)
+while ($q.Count -gt 0) {
+    $entry = $q.Dequeue()
     if ($null -eq $entry) { continue }
-    if ($entry -is [System.Array]) {
-        foreach ($child in $entry) { $catalogQueue.Enqueue($child) }
-    }
-    else {
-        $flatCatalog.Add($entry)
-    }
+    if ($entry -is [System.Array]) { foreach ($child in $entry) { $q.Enqueue($child) } }
+    else { $flat.Add($entry) }
 }
 
-$catalog = @($flatCatalog.ToArray() | Where-Object { $_.id -and $_.name } | Sort-Object id -Unique)
+$catalog = @($flat.ToArray() | Where-Object { $_.id -and $_.name } | Sort-Object id -Unique)
 if ($catalog.Count -eq 0) {
     Write-Error "No Item Mall catalog could be loaded from either the running portal or Server\Data\item_mall.json."
     exit 1
@@ -251,10 +244,8 @@ if ($catalog.Count -eq 0) {
 Write-Host "Found $($catalog.Count) unique Item Mall item IDs."
 Write-Host "Project image cache: $OutputDirectory"
 
-$manifest = New-Object System.Collections.Generic.List[object]
-$downloaded = 0
-$missing = 0
-$existing = 0
+$manifest = New-Object Collections.Generic.List[object]
+$downloaded = 0; $existing = 0; $missing = 0
 
 foreach ($item in $catalog) {
     $id = [int]$item.id
@@ -263,51 +254,36 @@ foreach ($item in $catalog) {
 
     if ((Test-Path -LiteralPath $destination) -and -not $Force) {
         $existing++
-        $manifest.Add([pscustomobject]@{ id=$id; name=$name; wikiTitle=''; source=''; status='existing' })
+        $manifest.Add([pscustomobject]@{ id=$id; name=$name; source=''; imageUrl=''; status='existing' })
         continue
     }
 
-    $match = $null
-    try {
-        foreach ($candidate in (Get-SearchCandidates $name)) {
-            $match = Get-PageImage $candidate
-            if ($match) { break }
-        }
-
-        if (-not $match) {
-            foreach ($candidate in (Get-SearchCandidates $name)) {
-                $match = Search-PageImage $candidate
-                if ($match) { break }
-            }
-        }
-    }
-    catch {
-        Write-Warning "Wiki lookup failed for #$id $name : $($_.Exception.Message)"
-    }
+    $match = Get-WloHubImage $id
+    if (-not $match) { $match = Search-WikiImage $name }
 
     if (-not $match) {
-        Write-Warning "No wiki image found: #$id $name"
+        Write-Warning "No usable image found: #$id $name"
         $missing++
-        $manifest.Add([pscustomobject]@{ id=$id; name=$name; wikiTitle=''; source=''; status='missing' })
+        $manifest.Add([pscustomobject]@{ id=$id; name=$name; source=''; imageUrl=''; status='missing' })
         continue
     }
 
     try {
-        Save-AsPng $match.Url $destination
-        Write-Host "Downloaded #$id $name <- $($match.Title)"
+        Save-ImageAsPng $match.Bytes $destination
+        Write-Host "Downloaded #$id $name <- $($match.Source)"
         $downloaded++
-        $manifest.Add([pscustomobject]@{ id=$id; name=$name; wikiTitle=$match.Title; source=$match.Url; status='downloaded' })
+        $manifest.Add([pscustomobject]@{ id=$id; name=$name; source=$match.Source; imageUrl=$match.Url; status='downloaded' })
     }
     catch {
         Write-Warning "Failed #$id $name : $($_.Exception.Message)"
         $missing++
-        $manifest.Add([pscustomobject]@{ id=$id; name=$name; wikiTitle=$match.Title; source=$match.Url; status='failed' })
+        $manifest.Add([pscustomobject]@{ id=$id; name=$name; source=$match.Source; imageUrl=$match.Url; status='failed' })
     }
 
-    Start-Sleep -Milliseconds 125
+    Start-Sleep -Milliseconds 75
 }
 
-$manifestPath = Join-Path $OutputDirectory 'wiki-image-manifest.csv'
+$manifestPath = Join-Path $OutputDirectory 'item-image-manifest.csv'
 $manifest | Export-Csv -NoTypeInformation -Encoding UTF8 -Path $manifestPath
 Mirror-ToRuntime $OutputDirectory
 
@@ -315,4 +291,5 @@ Write-Host ''
 Write-Host "Done. Downloaded: $downloaded | Existing: $existing | Missing/failed: $missing"
 Write-Host "Images: $OutputDirectory"
 Write-Host "Manifest: $manifestPath"
-Write-Host "Restart the WLO server (or hard-refresh the browser after the cache finishes) so the Item Mall uses the mirrored images."
+Write-Host 'The downloader now uses WLOHUB item pages by real WLO item ID first, with the Wonderland Wiki only as a fallback.'
+Write-Host 'Restart the WLO server, then hard-refresh /shop (Ctrl+F5).'
