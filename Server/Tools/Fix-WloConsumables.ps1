@@ -12,11 +12,17 @@ function Replace-Required {
         [string]$Label
     )
 
-    if (-not $Text.Contains($Old)) {
+    # Git checkouts on Windows can use CRLF while GitHub stores LF. Normalize both
+    # the file and patch anchors before matching so the patch works in either case.
+    $normalizedText = $Text.Replace("`r`n", "`n")
+    $normalizedOld  = $Old.Replace("`r`n", "`n")
+    $normalizedNew  = $New.Replace("`r`n", "`n")
+
+    if (-not $normalizedText.Contains($normalizedOld)) {
         throw "Could not find patch anchor: $Label"
     }
 
-    return $Text.Replace($Old, $New)
+    return $normalizedText.Replace($normalizedOld, $normalizedNew)
 }
 
 $equipPath = Join-Path $RepoRoot 'Server\wlo.pserver.core\Game\PlayerRelated\Equip.cs'
@@ -168,7 +174,7 @@ if (-not $equip.Contains('SetExpMultiplier(double multiplier, TimeSpan duration)
 # currently describe sufficiently for the emulator.
 # -----------------------------------------------------------------------------
 if (-not $ac23.Contains('using Game.Maps;')) {
-    $ac23 = Replace-Required $ac23 "using Game.Code;`r`nusing Game.PlayerRelated;" "using Game.Code;`r`nusing Game.Maps;`r`nusing Game.PlayerRelated;" 'AC23 Game.Maps import'
+    $ac23 = Replace-Required $ac23 "using Game.Code;`nusing Game.PlayerRelated;" "using Game.Code;`nusing Game.Maps;`nusing Game.PlayerRelated;" 'AC23 Game.Maps import'
 }
 
 if (-not $ac23.Contains('itemId == 32176')) {
@@ -183,7 +189,7 @@ if (-not $ac23.Contains('itemId == 32176')) {
             hpGain = 0;
             spGain = 0;
 
-            // Fugu Hot Pot (starter item #32176): official effect is HP +300 / SP +300.
+            // Fugu Hot Pot (starter item #32176): HP +300 / SP +300.
             if (itemId == 32176)
             {
                 hpGain = 300;
@@ -197,14 +203,14 @@ if (-not $ac23.Contains('itemId == 32176')) {
     $ac23 = Replace-Required $ac23 $oldRecovery $newRecovery 'Fugu Hot Pot recovery'
 }
 
-if (-not $ac23.Contains('10X Holy EXP Potion')) {
+if (-not $ac23.Contains('10X Holy EXP Potion (#34190)')) {
     $oldPotential = @'
                 // Potential Pill
                 if (itemId == 34269)
 '@
 
     $newPotential = @'
-                // 10X Holy EXP Potion (#34190): 10x battle EXP for two hours.
+                // 10X Holy EXP Potion (#34190): 10x EXP for two hours.
                 if (itemId == 34190)
                 {
                     if (p.Eqs == null)
@@ -216,14 +222,12 @@ if (-not $ac23.Contains('10X Holy EXP Potion')) {
                     p.Eqs.SetExpMultiplier(10.0, TimeSpan.FromHours(2));
                     p.Inv.RemoveItem(slot, 1);
                     p.SaveCharacterData();
-                    SendItemMessage(p, "10X Holy EXP Potion activated: battle EXP x10 for 2 hours.");
+                    SendItemMessage(p, "10X Holy EXP Potion activated: EXP x10 for 2 hours.");
                     DebugSystem.Write($"[AC23.UseItem] {p.CharName} activated 10X Holy EXP Potion (#34190) for 2 hours.");
                     return;
                 }
 
-                // Training Ticket (#34258): enter Training Island. The ticket grants a six-hour
-                // training session in the original game. The current emulator records the entry
-                // by consuming the ticket and warping to the Training Island entrance map.
+                // Training Ticket (#34258): enter Training Island.
                 if (itemId == 34258)
                 {
                     if (p.Level < 1 || p.Level > 199)
